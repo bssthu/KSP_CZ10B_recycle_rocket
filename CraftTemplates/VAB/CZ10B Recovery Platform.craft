@@ -1,0 +1,43 @@
+ship = Recovery Ship
+version = 1.12.5
+description = One-part functional cable-net recovery platform. Use VesselMover to place it on the sea before launching the rocket.
+type = VAB
+size = 30,1,30
+steamPublishedFileId = 0
+persistentId = 2026071001
+rot = 0,0,0,1
+missionFlag = Squad/Flags/default
+vesselType = Ship
+OverrideDefault = False,False,False,False
+OverrideActionControl = 0,0,0,0
+OverrideAxisControl = 0,0,0,0
+OverrideGroupNames = ,,,
+PART
+{
+	part = CZ10B-RecoveryPlatform_2026071101
+	partName = Part
+	persistentId = 2026071101
+	pos = 0,10,0
+	attPos = 0,0,0
+	attPos0 = 0,10,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = False
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}

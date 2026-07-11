@@ -1,0 +1,107 @@
+ship = CZ10B Two Stage Recovery Demo
+version = 1.12.5
+description = Three-part staged recovery demonstrator. Root is the programmable reusable booster; stage 1 ignites it and stage 0 decouples/ignites the upper stage.
+type = VAB
+size = 3,14.35,3
+steamPublishedFileId = 0
+persistentId = 2026071002
+rot = 0,0,0,1
+missionFlag = Squad/Flags/default
+vesselType = Probe
+OverrideDefault = False,False,False,False
+OverrideActionControl = 0,0,0,0
+OverrideAxisControl = 0,0,0,0
+OverrideGroupNames = ,,,
+PART
+{
+	part = CZ10B-DemoBooster_2026071201
+	partName = Part
+	persistentId = 2026071201
+	pos = 0,10,0
+	attPos = 0,0,0
+	attPos0 = 0,10,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Heaviest
+	rigidAttachment = False
+	istg = 1
+	resPri = 0
+	dstg = 0
+	sidx = 0
+	sqor = 1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = Decoupler.2_2026071202
+	attN = top,Decoupler.2_2026071202_0|3.73|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = Decoupler.2_2026071202
+	partName = Part
+	persistentId = 2026071202
+	pos = 0,13.83,0
+	attPos = 0,3.83,0
+	attPos0 = 0,13.83,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = False
+	istg = 0
+	resPri = 0
+	dstg = 0
+	sidx = 0
+	sqor = 0
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = CZ10B-DemoUpperStage_2026071203
+	attN = bottom,CZ10B-DemoBooster_2026071201_0|-0.1|0
+	attN = top,CZ10B-DemoUpperStage_2026071203_0|0.1|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = CZ10B-DemoUpperStage_2026071203
+	partName = Part
+	persistentId = 2026071203
+	pos = 0,16.35,0
+	attPos = 0,2.52,0
+	attPos0 = 0,16.35,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = False
+	istg = 0
+	resPri = 0
+	dstg = 0
+	sidx = 1
+	sqor = 0
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	attN = bottom,Decoupler.2_2026071202_0|-2.42|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}

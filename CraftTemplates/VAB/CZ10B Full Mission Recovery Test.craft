@@ -1,0 +1,171 @@
+ship = CZ10B Full Mission Recovery Test
+version = 1.12.5
+description = Integrated full-flight acceptance rig. kOS launches the offset two-stage vehicle to 18 km, separates the upper stage and returns the reusable booster to the four-cable net.
+type = VAB
+size = 36,25,30
+steamPublishedFileId = 0
+persistentId = 2026071501
+rot = 0,0,0,1
+missionFlag = Squad/Flags/default
+vesselType = Ship
+OverrideDefault = False,False,False,False
+OverrideActionControl = 0,0,0,0
+OverrideAxisControl = 0,0,0,0
+OverrideGroupNames = ,,,
+PART
+{
+	part = CZ10B-RecoveryPlatform_2026071501
+	partName = Part
+	persistentId = 2026071501
+	pos = 0,10,0
+	attPos = 0,0,0
+	attPos0 = 0,10,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = False
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = CZ10B-MissionLaunchRail_2026071502
+	attN = top,CZ10B-MissionLaunchRail_2026071502_0|0.08|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = CZ10B-MissionLaunchRail_2026071502
+	partName = Part
+	persistentId = 2026071502
+	pos = 0,10.08,0
+	attPos = 0,0.08,0
+	attPos0 = 0,10.08,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = True
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = CZ10B-DemoBooster_2026071503
+	attN = bottom,CZ10B-RecoveryPlatform_2026071501_0|0|0
+	attN = top,CZ10B-DemoBooster_2026071503_0|18|8|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = CZ10B-DemoBooster_2026071503
+	partName = Part
+	persistentId = 2026071503
+	pos = 18,24.78,0
+	attPos = 18,14.70,0
+	attPos0 = 18,24.78,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Heaviest
+	rigidAttachment = False
+	istg = 1
+	resPri = 0
+	dstg = 0
+	sidx = 0
+	sqor = 1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = Decoupler.2_2026071504
+	attN = bottom,CZ10B-MissionLaunchRail_2026071502_0|-6.7|0
+	attN = top,Decoupler.2_2026071504_0|3.73|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = Decoupler.2_2026071504
+	partName = Part
+	persistentId = 2026071504
+	pos = 18,28.61,0
+	attPos = 0,3.83,0
+	attPos0 = 18,28.61,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = False
+	istg = 0
+	resPri = 0
+	dstg = 0
+	sidx = 0
+	sqor = 0
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = CZ10B-DemoUpperStage_2026071505
+	attN = bottom,CZ10B-DemoBooster_2026071503_0|-0.1|0
+	attN = top,CZ10B-DemoUpperStage_2026071505_0|0.1|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = CZ10B-DemoUpperStage_2026071505
+	partName = Part
+	persistentId = 2026071505
+	pos = 18,31.13,0
+	attPos = 0,2.52,0
+	attPos0 = 18,31.13,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = False
+	istg = 0
+	resPri = 0
+	dstg = 0
+	sidx = 1
+	sqor = 0
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	attN = bottom,Decoupler.2_2026071504_0|-2.42|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}

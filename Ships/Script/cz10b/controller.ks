@@ -1,0 +1,69 @@
+// Reusable vector and guidance helpers for kOS 1.4+.
+
+FUNCTION CLAMP {
+    PARAMETER X, LO, HI.
+    RETURN MAX(LO, MIN(HI, X)).
+}
+
+FUNCTION CLAMPV {
+    PARAMETER VEC, LIMIT.
+    IF VEC:MAG > LIMIT {
+        RETURN VEC:NORMALIZED * LIMIT.
+    }
+    RETURN VEC.
+}
+
+FUNCTION FIND_RECOVERY_SHIP {
+    PARAMETER WANTED_NAME.
+    LOCAL FOUND IS 0.
+    LOCAL ALL_VESSELS IS LIST().
+    LIST VESSELS IN ALL_VESSELS.
+    FOR CANDIDATE IN ALL_VESSELS {
+        IF CANDIDATE:NAME = WANTED_NAME {
+            SET FOUND TO CANDIDATE.
+        }
+    }
+    RETURN FOUND.
+}
+
+FUNCTION NET_POSITION {
+    PARAMETER PLATFORM.
+    // A landed target outside KSP's physics bubble has an orbit-level position
+    // but no live Part collection. Use its vessel origin until it reloads.
+    IF NOT PLATFORM:LOADED { RETURN PLATFORM:POSITION. }
+    LOCAL NET_PARTS IS PLATFORM:PARTSNAMED("CZ10B-CatchNet").
+    IF NET_PARTS:LENGTH = 0 {
+        SET NET_PARTS TO PLATFORM:PARTSNAMED("CZ10B-RecoveryPlatform").
+    }
+    IF NET_PARTS:LENGTH > 0 {
+        RETURN NET_PARTS[0]:POSITION.
+    }
+    // Fallback allows early tests against a ship that has no custom net part.
+    RETURN PLATFORM:POSITION.
+}
+
+FUNCTION HOOK_CAPTURED {
+    LOCAL HOOKS IS SHIP:PARTSNAMED("CZ10B-CatchHook").
+    IF HOOKS:LENGTH = 0 {
+        SET HOOKS TO SHIP:PARTSNAMED("CZ10B-DemoBooster").
+    }
+    IF HOOKS:LENGTH = 0 {
+        SET HOOKS TO SHIP:PARTSNAMED("CZ10B-HoverTestBooster").
+    }
+    IF HOOKS:LENGTH = 0 { RETURN FALSE. }
+    LOCAL HOOK_MODULE IS HOOKS[0]:GETMODULE("ModuleCatchHook").
+    IF NOT HOOK_MODULE:HASFIELD("Hook state") { RETURN FALSE. }
+    RETURN HOOK_MODULE:GETFIELD("Hook state") = "Captured".
+}
+
+FUNCTION WRITE_TELEMETRY {
+    PARAMETER PHASE_NAME, MISSION_ID, HEIGHT, HOOK_HEIGHT, VERTICAL_V,
+              HORIZONTAL_V, HORIZONTAL_ERROR, THROTTLE_CMD, TILT_CMD.
+    LOCAL ROW IS MISSION_ID + "," + PHASE_NAME + "," + ROUND(TIME:SECONDS,3)
+        + "," + ROUND(HEIGHT,2) + "," + ROUND(HOOK_HEIGHT,2)
+        + "," + ROUND(VERTICAL_V,3) + "," + ROUND(HORIZONTAL_V,3)
+        + "," + ROUND(HORIZONTAL_ERROR,3) + "," + ROUND(THROTTLE_CMD,4)
+        + "," + ROUND(TILT_CMD,3) + "," + ROUND(SHIP:MASS,3)
+        + "," + ROUND(SHIP:AVAILABLETHRUST,2).
+    LOG ROW TO "0:/cz10b/telemetry.csv".
+}

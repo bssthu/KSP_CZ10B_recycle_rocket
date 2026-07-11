@@ -1,0 +1,7 @@
+.downloads/
+.install/
+src/**/bin/
+src/**/obj/
+Ships/Script/cz10b/telemetry.csv
+*.user
+*.suo

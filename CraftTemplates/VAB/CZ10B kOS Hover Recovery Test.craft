@@ -1,0 +1,139 @@
+ship = CZ10B kOS Hover Recovery Test
+version = 1.12.5
+description = Automated 61 m powered-descent acceptance rig. The harness only releases the reusable stage; its onboard kOS program commands engine, throttle and attitude through four-cable capture.
+type = VAB
+size = 30,66,30
+steamPublishedFileId = 0
+persistentId = 2026071401
+rot = 0,0,0,1
+missionFlag = Squad/Flags/default
+vesselType = Ship
+OverrideDefault = False,False,False,False
+OverrideActionControl = 0,0,0,0
+OverrideAxisControl = 0,0,0,0
+OverrideGroupNames = ,,,
+PART
+{
+	part = CZ10B-RecoveryPlatform_2026071401
+	partName = Part
+	persistentId = 2026071401
+	pos = 0,10,0
+	attPos = 0,0,0
+	attPos0 = 0,10,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = False
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = CZ10B-HoverSuspension_2026071402
+	attN = top,CZ10B-HoverSuspension_2026071402_0|0.08|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = CZ10B-HoverSuspension_2026071402
+	partName = Part
+	persistentId = 2026071402
+	pos = 0,10.08,0
+	attPos = 0,0.08,0
+	attPos0 = 0,10.08,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = True
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = Decoupler.2_2026071403
+	attN = bottom,CZ10B-RecoveryPlatform_2026071401_0|0|0
+	attN = top,Decoupler.2_2026071403_0|52|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = Decoupler.2_2026071403
+	partName = Part
+	persistentId = 2026071403
+	pos = 0,62.18,0
+	attPos = 0,52.10,0
+	attPos0 = 0,62.18,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = False
+	istg = 0
+	resPri = 0
+	dstg = 0
+	sidx = 0
+	sqor = 0
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = CZ10B-HoverTestBooster_2026071404
+	attN = bottom,CZ10B-HoverSuspension_2026071402_0|-0.1|0
+	attN = top,CZ10B-HoverTestBooster_2026071404_0|0.1|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = CZ10B-HoverTestBooster_2026071404
+	partName = Part
+	persistentId = 2026071404
+	pos = 0,68.98,0
+	attPos = 0,6.80,0
+	attPos0 = 0,68.98,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = False
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = 0
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	attN = bottom,Decoupler.2_2026071403_0|-6.7|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
