@@ -1,7 +1,7 @@
 """Deterministic point-mass regression for constrained terminal guidance.
 
-This mirrors the receding cubic reference, acceleration/tilt constraints,
-centerline hold and moving-cable wait in ``main.ks``.  It is deliberately not a
+This mirrors the fixed-arrival cubic reference, acceleration/tilt constraints,
+near-field PID handover and continuously tracking cable wait in ``main.ks``. It is not a
 high-fidelity KSP atmosphere or propulsion simulation.
 """
 
@@ -18,14 +18,20 @@ CAPTURE_SPEED = 0.65
 NET_MAX_VERTICAL = 7.5
 NET_MAX_LATERAL = 4.0
 NET_HALF_WIDTH = 10.0
-TGO_MIN = 6.0
-TGO_MAX = 45.0
+TGO_MIN = 35.0
+TGO_MAX = 90.0
 MAX_HORIZONTAL_ACCEL = 8.0
-CENTERING_HOLD_HEIGHT = 150.0
+PID_SWITCH_HEIGHT = 500.0
+CENTERING_HOLD_HEIGHT = 30.0
+CENTERING_HOLD_ERROR = 7.0
 WIRE_HOLD_HEIGHT = 12.0
 CABLE_TRIGGER_HEIGHT = 16.0
 CABLE_TRIGGER_HALF_WIDTH = 8.0
-CABLE_CLOSE_SECONDS = 2.5
+CABLE_CLOSE_SECONDS = (8.0 - 2.15) / 2.5
+CABLE_TRACKING_SPEED = 5.0
+CABLE_SETTLE_ERROR = 0.5
+CLOSED_CABLE_INSET = 2.15
+TERMINAL_ACCEL_FILTER = 0.10
 FINAL_HORIZONTAL_SPEED = 2.5
 ENTRY_MAX_TILT = 28.0
 LANDING_MAX_TILT = 12.0
@@ -65,6 +71,8 @@ class Result:
     lateral_speed: float
     lateral_error: float
     minimum_height: float
+    hover_time: float
+    cable_error: float
 
 
 def run(case: Case) -> Result:
@@ -72,13 +80,24 @@ def run(case: Case) -> Result:
     vv = case.vertical_speed
     x, z, vx, vz = case.x, case.z, case.vx, case.vz
     integral = 0.0
-    was_holding = False
+    was_pid_mode = False
     cable_close_elapsed = 0.0
     net_closed = False
+    cable_x = 0.0
+    cable_z = 0.0
     actual_ax = 0.0
     actual_az = 0.0
+    filtered_ax = 0.0
+    filtered_az = 0.0
     history: list[tuple[float, float, float, float, float, float]] = []
     minimum_height = h
+    hover_time = 0.0
+    initial_error = math.hypot(x, z)
+    plan_vertical_tgo = 2.0 * max(h, 1.0) / max(-vv + CAPTURE_SPEED, 1.0)
+    plan_horizontal_tgo = 2.0 * initial_error / max(
+        math.hypot(vx, vz) + FINAL_HORIZONTAL_SPEED, 10.0
+    )
+    plan_arrival = clamp(max(plan_vertical_tgo, plan_horizontal_tgo), TGO_MIN, TGO_MAX)
 
     for step in range(int(480 / DT)):
         now = step * DT
@@ -87,17 +106,18 @@ def run(case: Case) -> Result:
         sensed_h, sensed_vv, sensed_x, sensed_z, sensed_vx, sensed_vz = history[-1 - delay_steps]
 
         error = math.hypot(sensed_x, sensed_z)
-        centering_required = sensed_h < CENTERING_HOLD_HEIGHT and error > 5.0
-        wire_required = sensed_h < WIRE_HOLD_HEIGHT and not net_closed
-        hold_required = centering_required or wire_required
-        low_descent = sensed_h < CENTERING_HOLD_HEIGHT and not hold_required
-        if was_holding and not hold_required:
+        pid_mode = sensed_h <= PID_SWITCH_HEIGHT
+        if pid_mode and not was_pid_mode:
             integral = 0.0
-        was_holding = hold_required
+        was_pid_mode = pid_mode
+        centering_required = (
+            pid_mode
+            and sensed_h < CENTERING_HOLD_HEIGHT
+            and error > CENTERING_HOLD_ERROR
+        )
+        wire_required = sensed_h < WIRE_HOLD_HEIGHT and not net_closed
 
-        vertical_tgo = 2.0 * max(sensed_h, 1.0) / max(-sensed_vv, 1.0)
-        horizontal_tgo = 2.0 * error / max(math.hypot(sensed_vx, sensed_vz), 1.0)
-        tgo = clamp(max(vertical_tgo, horizontal_tgo), TGO_MIN, TGO_MAX)
+        tgo = max(plan_arrival - now, 1.5)
         vertical_net_accel = (
             -6.0 * max(sensed_h, 0.0) / (tgo**2)
             - (4.0 * sensed_vv - 2.0 * CAPTURE_SPEED) / tgo
@@ -110,28 +130,43 @@ def run(case: Case) -> Result:
         az = 6.0 * sensed_z / (tgo**2) - 4.0 * sensed_vz / tgo
         ax, az = clamp_vector(ax, az, MAX_HORIZONTAL_ACCEL)
 
-        if sensed_h < CENTERING_HOLD_HEIGHT:
+        if pid_mode:
+            pid_horizontal_speed = max(
+                FINAL_HORIZONTAL_SPEED, min(10.0, max(sensed_h, 0.0) * 0.03)
+            )
             desired_vx, desired_vz = clamp_vector(
-                sensed_x * 0.050, sensed_z * 0.050, FINAL_HORIZONTAL_SPEED
+                sensed_x * 0.050, sensed_z * 0.050, pid_horizontal_speed
             )
             ax, az = clamp_vector(
                 (desired_vx - sensed_vx) * 0.20,
                 (desired_vz - sensed_vz) * 0.20,
                 MAX_HORIZONTAL_ACCEL,
             )
-        if hold_required:
-            integral = clamp(integral - sensed_vv * DT, -10.0, 10.0)
-            vertical_thrust_command = G - 0.62 * sensed_vv + 0.045 * integral
-        if low_descent:
-            low_target_v = -max(CAPTURE_SPEED, min(1.2, max(sensed_h, 0.0) * 0.1))
+            pid_target_v = -max(
+                CAPTURE_SPEED, min(8.0, max(sensed_h, 0.0) * 0.04)
+            )
+            if centering_required:
+                pid_target_v = -CAPTURE_SPEED
+            if wire_required:
+                pid_target_v = 0.0
             integral = clamp(
-                integral + (low_target_v - sensed_vv) * DT, -10.0, 10.0
+                integral + (pid_target_v - sensed_vv) * DT, -10.0, 10.0
             )
             vertical_thrust_command = (
                 G
-                + 0.62 * (low_target_v - sensed_vv)
+                + 0.62 * (pid_target_v - sensed_vv)
                 + 0.045 * integral
             )
+
+        filtered_ax = (
+            filtered_ax * (1.0 - TERMINAL_ACCEL_FILTER)
+            + ax * TERMINAL_ACCEL_FILTER
+        )
+        filtered_az = (
+            filtered_az * (1.0 - TERMINAL_ACCEL_FILTER)
+            + az * TERMINAL_ACCEL_FILTER
+        )
+        ax, az = filtered_ax, filtered_az
 
         vertical_thrust_command = clamp(
             vertical_thrust_command, 0.0, case.available_accel * 0.96
@@ -167,11 +202,34 @@ def run(case: Case) -> Result:
         z -= vz * DT
         minimum_height = min(minimum_height, h)
 
+        if h < 150.0 and h > WIRE_HOLD_HEIGHT and abs(vv) < 0.3:
+            hover_time += DT
+
         if h <= CABLE_TRIGGER_HEIGHT and math.hypot(x, z) <= CABLE_TRIGGER_HALF_WIDTH:
             cable_close_elapsed += DT
-            net_closed = cable_close_elapsed >= CABLE_CLOSE_SECONDS
+            close_fraction = clamp(cable_close_elapsed / CABLE_CLOSE_SECONDS, 0.0, 1.0)
+            cable_inset = 8.0 + (CLOSED_CABLE_INSET - 8.0) * close_fraction
+            cable_limit = NET_HALF_WIDTH - cable_inset
+            target_cable_x = clamp(x, -cable_limit, cable_limit)
+            target_cable_z = clamp(z, -cable_limit, cable_limit)
+            cable_dx, cable_dz = target_cable_x - cable_x, target_cable_z - cable_z
+            cable_step_x, cable_step_z = clamp_vector(
+                cable_dx, cable_dz, CABLE_TRACKING_SPEED * DT
+            )
+            cable_x += cable_step_x
+            cable_z += cable_step_z
+            net_closed = (
+                close_fraction >= 1.0
+                and math.hypot(cable_x - x, cable_z - z) <= CABLE_SETTLE_ERROR
+            )
         elif not net_closed:
             cable_close_elapsed = 0.0
+            cable_dx, cable_dz = -cable_x, -cable_z
+            cable_step_x, cable_step_z = clamp_vector(
+                cable_dx, cable_dz, CABLE_TRACKING_SPEED * DT
+            )
+            cable_x += cable_step_x
+            cable_z += cable_step_z
 
         if h <= 0:
             lateral_speed = math.hypot(vx, vz)
@@ -182,9 +240,15 @@ def run(case: Case) -> Result:
                 and lateral_error <= NET_HALF_WIDTH
                 and net_closed
             )
-            return Result(captured, now, vv, lateral_speed, lateral_error, minimum_height)
+            return Result(
+                captured, now, vv, lateral_speed, lateral_error, minimum_height,
+                hover_time, math.hypot(cable_x - x, cable_z - z),
+            )
 
-    return Result(False, 480.0, vv, math.hypot(vx, vz), math.hypot(x, z), minimum_height)
+    return Result(
+        False, 480.0, vv, math.hypot(vx, vz), math.hypot(x, z),
+        minimum_height, hover_time, math.hypot(cable_x - x, cable_z - z),
+    )
 
 
 def cases(seed: int = 20260710, count: int = 250) -> list[Case]:
@@ -211,7 +275,7 @@ def cases(seed: int = 20260710, count: int = 250) -> list[Case]:
         direction_x = math.cos(angle)
         direction_z = math.sin(angle)
         result.append(Case(
-            height=rng.uniform(6300, 7000),
+            height=rng.uniform(9000, 10000),
             vertical_speed=rng.uniform(-540, -430),
             x=distance * direction_x,
             z=distance * direction_z,
@@ -231,6 +295,8 @@ def main() -> int:
         print(f"worst_entry_vertical={max(abs(r.vertical_speed) for r in successes):.3f} m/s")
         print(f"worst_entry_lateral={max(r.lateral_speed for r in successes):.3f} m/s")
         print(f"worst_entry_error={max(r.lateral_error for r in successes):.3f} m")
+        print(f"worst_hover_time_below_150m={max(r.hover_time for r in successes):.3f} s")
+        print(f"worst_cable_tracking_error={max(r.cable_error for r in successes):.3f} m")
     failures = [result for result in results if not result.captured]
     for result in failures[:5]:
         print("failure", result)

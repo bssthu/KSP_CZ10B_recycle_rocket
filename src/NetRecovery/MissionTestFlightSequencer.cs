@@ -31,6 +31,7 @@ namespace CZ10BNetRecovery
         private double seaTerrainAltitude;
         private bool seaPlacementReleased;
         private float seaReleaseAt;
+        private float maxHighAngularRate;
 
         private void Start()
         {
@@ -57,9 +58,12 @@ namespace CZ10BNetRecovery
             if (!active || reported)
                 return;
             float elapsed = Time.realtimeSinceStartup - startRealtime;
-            if (!released && elapsed >= 3f)
+            // Cold starts can spend several seconds unpacking colliders after
+            // Flight becomes active.  Keep the combined stack on the pad long
+            // enough for one stable physics window before separating the ship.
+            if (!released && elapsed >= 8f)
                 ReleaseVehicle();
-            if (released && !switched && elapsed >= 3.1f)
+            if (released && !switched && elapsed >= 8.2f)
                 SwitchToBooster();
             if (pendingSeaPlatform != null && Time.realtimeSinceStartup >= seaMoveAt)
             {
@@ -79,6 +83,9 @@ namespace CZ10BNetRecovery
             if (booster != null)
             {
                 reachedAltitude |= booster.altitude > 2000;
+                if (upperSeparated && booster.altitude > 10000)
+                    maxHighAngularRate = Mathf.Max(maxHighAngularRate,
+                        booster.angularVelocity.magnitude * Mathf.Rad2Deg);
                 ModuleEngines engine = booster.parts
                     .Select(p => p.FindModuleImplementing<ModuleEngines>())
                     .FirstOrDefault(e => e != null);
@@ -118,7 +125,7 @@ namespace CZ10BNetRecovery
                         seaPlatform.mainBody.GetWorldSurfacePosition(
                             seaPlatform.latitude, seaPlatform.longitude, 0));
                 Debug.Log(string.Format(
-                    "[CZ10BNetRecovery] {0}_STATUS t={1:F1} altitude={2:F0} lat={3:F5} lon={4:F5} horizontal={5:F1} targetDistance={6:F0} powered={7} high={8} separated={9} hook={10} net={11}",
+                    "[CZ10BNetRecovery] {0}_STATUS t={1:F1} altitude={2:F0} lat={3:F5} lon={4:F5} horizontal={5:F1} targetDistance={6:F0} powered={7} high={8} separated={9} hook={10} net={11} cableError={12:F2} sag={13:F2} maxHighAngular={14:F2} angular={15:F2}",
                     Prefix,
                     elapsed, booster == null ? -1 : booster.altitude,
                     booster == null ? 0 : booster.latitude,
@@ -126,7 +133,12 @@ namespace CZ10BNetRecovery
                     booster == null ? 0 : booster.horizontalSrfSpeed,
                     targetDistance, everPowered, reachedAltitude, upperSeparated,
                     hook == null ? "missing" : hook.hookState,
-                    net == null ? "missing" : net.netState));
+                    net == null ? "missing" : net.netState,
+                    net == null ? -1f : net.cableTrackingError,
+                    net == null ? -1f : net.cableDeflection,
+                    maxHighAngularRate,
+                    booster == null ? -1f :
+                        booster.angularVelocity.magnitude * Mathf.Rad2Deg));
                 if (seaMission && seaPlatform != null)
                 {
                     Debug.Log(string.Format(
@@ -171,14 +183,20 @@ namespace CZ10BNetRecovery
             if (booster == null || HasPart(booster, "CZ10B-RecoveryPlatform"))
                 return;
             booster.GoOffRails();
-            booster.situation = Vessel.Situations.FLYING;
+            // TT18-A clamps still carry the stage at this point. Preserve the
+            // stock PRELAUNCH state and clear only residual angular momentum;
+            // forcing FLYING here intermittently killed the kOS engine context
+            // before ignition on cold starts.
+            booster.situation = Vessel.Situations.PRELAUNCH;
+            booster.angularVelocity = Vector3.zero;
+            booster.angularMomentum = Vector3.zero;
             FlightGlobals.SetActiveVessel(booster);
             if (net != null)
                 FlightGlobals.fetch.SetVesselTarget(net.vessel, true);
             if (seaMission && net != null)
             {
                 pendingSeaPlatform = net.vessel;
-                seaMoveAt = Time.realtimeSinceStartup + 0.75f;
+                seaMoveAt = Time.realtimeSinceStartup + 1.5f;
             }
             switched = true;
             Debug.Log("[CZ10BNetRecovery] " + Prefix + "_RELEASED target=" +
@@ -189,8 +207,9 @@ namespace CZ10BNetRecovery
         {
             reported = true;
             string detail = string.Format(
-                " powered={0} high={1} separated={2} hook={3}", everPowered,
-                reachedAltitude, upperSeparated, hook == null ? "missing" : hook.hookState);
+                " powered={0} high={1} separated={2} hook={3} maxHighAngular={4:F2}",
+                everPowered, reachedAltitude, upperSeparated,
+                hook == null ? "missing" : hook.hookState, maxHighAngularRate);
             if (pass)
                 Debug.Log("[CZ10BNetRecovery] " + Prefix + "_PASS" + detail);
             else
@@ -214,13 +233,14 @@ namespace CZ10BNetRecovery
             ExtendRanges(platform.vesselRanges.orbit);
             seaLatitude = platform.latitude;
             double startLongitude = platform.longitude;
-            // Put the ship under the measured down-range arc. The old 6 km test
-            // position forced an unrealistic continuous boost-back immediately
-            // after separation; about 26 km preserves the apogee coast while
-            // leaving enough range to brake the horizontal velocity at terminal.
-            seaLongitude = startLongitude + 2.50;
+            // The 45-degree Kerbin-scaled gravity turn puts apogee about 26 km
+            // down-range while the stage still carries ~385 m/s eastward speed.
+            // Place the ship farther ahead so the single boost-back burn only
+            // brakes to the planned eastward arrival velocity; the old 2.50 deg
+            // location required a wasteful 12 km reversal after overshooting it.
+            seaLongitude = startLongitude + 3.50;
             seaTerrainAltitude = TerrainAltitude(body, seaLatitude, seaLongitude);
-            for (double offset = 2.50; offset <= 5.00; offset += 0.20)
+            for (double offset = 3.50; offset <= 5.00; offset += 0.20)
             {
                 double candidateLongitude = startLongitude + offset;
                 double candidateTerrain = TerrainAltitude(body, seaLatitude,

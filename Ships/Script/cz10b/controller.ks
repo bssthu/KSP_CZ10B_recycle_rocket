@@ -13,6 +13,15 @@ FUNCTION CLAMPV {
     RETURN VEC.
 }
 
+FUNCTION COAST_TIME_TO_HEIGHT {
+    PARAMETER CURRENT_HEIGHT, VERTICAL_V, TARGET_HEIGHT, GRAVITY.
+    // Positive vertical velocity is upward. Solve
+    // dh + v*t - 0.5*g*t^2 = 0 for the future descending crossing.
+    LOCAL DH IS MAX(CURRENT_HEIGHT - TARGET_HEIGHT, 0).
+    RETURN MAX((VERTICAL_V + SQRT(MAX(VERTICAL_V^2
+        + 2 * GRAVITY * DH, 0))) / MAX(GRAVITY, 0.001), 1).
+}
+
 FUNCTION FIND_RECOVERY_SHIP {
     PARAMETER WANTED_NAME.
     LOCAL FOUND IS 0.

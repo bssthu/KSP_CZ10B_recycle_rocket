@@ -51,14 +51,18 @@ def main() -> int:
     mission_rows = [row for row in rows if row["mission"] == mission]
     phase_counts = {
         name: sum(row["phase"] == name for row in mission_rows)
-        for name in ("ASCENT", "COAST", "BOOSTBACK", "ENTRY", "TERMINAL")
+        for name in (
+            "ASCENT", "COAST", "BOOSTBACK", "ENTRY", "TRAJECTORY",
+            "PID_TERMINAL", "TERMINAL",
+        )
     }
     phase = next(
-        (name for name in ("TERMINAL", "HOVER_TEST", "RETURN")
+        (name for name in ("PID_TERMINAL", "TERMINAL", "HOVER_TEST", "RETURN")
          if any(row["phase"] == name for row in mission_rows)),
         "",
     )
-    flight = [row for row in mission_rows if row["phase"] == phase]
+    terminal_names = {"TRAJECTORY", "PID_TERMINAL"} if phase == "PID_TERMINAL" else {phase}
+    flight = [row for row in mission_rows if row["phase"] in terminal_names]
     if not flight:
         present = sorted({str(row["phase"]) for row in mission_rows})
         print(f"mission={mission}: no terminal samples; present={present}")
@@ -72,6 +76,13 @@ def main() -> int:
     saturated = sum(float(row["throttle"]) > 0.98 for row in flight) / len(flight)
     min_error = min(float(row["h_error"]) for row in low or flight)
     max_tilt_low = max(float(row["tilt"]) for row in low or flight)
+    hover_time = 0.0
+    for previous, current in zip(flight, flight[1:]):
+        if (12.0 < float(previous["hook_height"]) < 150.0
+                and abs(float(previous["v_vertical"])) < 0.3):
+            hover_time += min(
+                max(float(current["ut"]) - float(previous["ut"]), 0.0), 0.5
+            )
 
     print(f"mission={mission} phase={phase} samples={len(flight)}")
     print("phase_samples=" + ",".join(
@@ -84,9 +95,10 @@ def main() -> int:
     print(f"minimum_error_below_100m={min_error:.2f} m")
     print(f"throttle_saturation_fraction={saturated:.1%}")
     print(f"max_tilt_below_100m={max_tilt_low:.1f} deg")
+    print(f"hover_time_between_12m_and_150m={hover_time:.2f} s")
 
     hints: list[str] = []
-    if phase in {"RETURN", "TERMINAL"} and float(entry["v_vertical"]) < -5:
+    if phase in {"RETURN", "TERMINAL", "PID_TERMINAL"} and float(entry["v_vertical"]) < -5:
         hints.append("terminal descent still fast: start the single ENTRY burn earlier or extend its maximum time")
     if saturated > 0.25:
         hints.append("insufficient control authority: reduce landing mass or use a stronger engine")
