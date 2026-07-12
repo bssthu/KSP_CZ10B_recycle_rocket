@@ -9,6 +9,13 @@
 ```powershell
 $ksp = 'C:\Projects\Kerbal Space Program'
 $pluginData = Join-Path $ksp 'GameData\CZ10BRecovery\PluginData'
+$volume = (Select-String `
+  -LiteralPath (Join-Path $ksp 'settings.cfg') `
+  -Pattern '^\s*MASTER_VOLUME\s*=' | Select-Object -First 1).Line.Trim()
+
+if ($volume -ne 'MASTER_VOLUME = 0') {
+  throw "为避免启动声音，已中止：$volume"
+}
 
 New-Item -ItemType Directory -Force -Path $pluginData | Out-Null
 
@@ -30,12 +37,15 @@ Start-Process `
 1. KSP 加载到主菜单。
 2. 插件创建 `CZ10BShowcase` 沙盒并进入航天中心。
 3. 自动装载 `CZ10B Full Mission Recovery Test`。
-4. 回收平台部署到 KSC 以东约 6.3 km 的深水海面并释放水面物理。
-5. kOS 点燃一级、执行上升，在约 18 km 完成两级分离。
-6. 一级执行 boost-back、再入制动、150 m 以下高度保持与横向对中。
-7. 四个挂点低速进入缆网；捕获后场景保持运行，方便环绕观察。
+4. 初始整箭和回收船都在发射台；插件先分离回收船，将其部署到 KSC 以东约 26.2 km 的深水海面并释放水面物理。
+5. 回收船移动完成 10 秒后一级点火；两个 TT18-A 继续抱持，实测推重比超过 1.02 后才释放起飞。
+6. 火箭只做 20° 的常规重力转弯，在约 18 km 完成两级分离；上面级沿分离前方向继续飞行。
+7. 一级保持零油门越过远地点，再翻转并执行一次返航点火；随后气动滑行并执行一次再入制动。
+8. 6.5 km 以下由受推力、横向加速度和倾角约束的终端制导归中；150 m 以下若未对中会停止下降。
+9. 一级进入塔架后四条索向内合拢；索网闭合后一级以约 0.65 m/s 穿网，捕获索随后随箭体向下弹性挠曲。
+10. 捕获后场景保持运行，塔架上的静态收拢抱夹可作为转运固定机构的外观参考，方便环绕观察。
 
-从进入 Flight 到捕获约 8 分钟；连同游戏加载通常需要约 10 分钟。
+0.5.0 实测从进入 Flight 到稳定通过约 7 分钟（任务 UT 约 424 秒）。连同游戏加载所需的墙钟时间取决于磁盘和近场物理帧率，性能较低时会明显更久；应以屏幕流程或 `SEA_MISSION_TEST_PASS` 为准，不要因超过固定分钟数而中断。
 
 ## 观看时不要干预的项目
 

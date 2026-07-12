@@ -19,6 +19,7 @@ namespace CZ10BNetRecovery
         private bool reachedAltitude;
         private bool upperSeparated;
         private float startRealtime;
+        private double startUniversalTime;
         private float capturedAt = -1f;
         private float nextStatus;
         private bool seaMission;
@@ -46,6 +47,7 @@ namespace CZ10BNetRecovery
             if (seaMission)
                 File.Delete(seaMarker);
             startRealtime = Time.realtimeSinceStartup;
+            startUniversalTime = Planetarium.GetUniversalTime();
             Debug.Log("[CZ10BNetRecovery] " + Prefix + "_FLIGHT_READY vessel=" +
                       vessel.vesselName + " sea=" + seaMission);
         }
@@ -88,6 +90,13 @@ namespace CZ10BNetRecovery
             ModuleCatchHook hook = booster == null ? null : booster.parts
                 .Select(p => p.FindModuleImplementing<ModuleCatchHook>())
                 .FirstOrDefault(h => h != null);
+            if (released && elapsed > 20f && booster == null)
+            {
+                Debug.LogError("[CZ10BNetRecovery] " + Prefix +
+                               "_BOOSTER_LOST");
+                Report(false, hook);
+                return;
+            }
             if (hook != null && hook.hookState == "Captured")
             {
                 if (capturedAt < 0f)
@@ -101,12 +110,23 @@ namespace CZ10BNetRecovery
             if (elapsed >= nextStatus)
             {
                 nextStatus = elapsed + 5f;
+                ModuleCatchNet net = FindNet();
+                double targetDistance = booster == null || seaPlatform == null
+                    ? -1 : Vector3d.Distance(
+                        booster.mainBody.GetWorldSurfacePosition(
+                            booster.latitude, booster.longitude, 0),
+                        seaPlatform.mainBody.GetWorldSurfacePosition(
+                            seaPlatform.latitude, seaPlatform.longitude, 0));
                 Debug.Log(string.Format(
-                    "[CZ10BNetRecovery] {0}_STATUS t={1:F1} altitude={2:F0} powered={3} high={4} separated={5} hook={6}",
+                    "[CZ10BNetRecovery] {0}_STATUS t={1:F1} altitude={2:F0} lat={3:F5} lon={4:F5} horizontal={5:F1} targetDistance={6:F0} powered={7} high={8} separated={9} hook={10} net={11}",
                     Prefix,
-                    elapsed, booster == null ? -1 : booster.altitude, everPowered,
-                    reachedAltitude, upperSeparated,
-                    hook == null ? "missing" : hook.hookState));
+                    elapsed, booster == null ? -1 : booster.altitude,
+                    booster == null ? 0 : booster.latitude,
+                    booster == null ? 0 : booster.longitude,
+                    booster == null ? 0 : booster.horizontalSrfSpeed,
+                    targetDistance, everPowered, reachedAltitude, upperSeparated,
+                    hook == null ? "missing" : hook.hookState,
+                    net == null ? "missing" : net.netState));
                 if (seaMission && seaPlatform != null)
                 {
                     Debug.Log(string.Format(
@@ -117,7 +137,11 @@ namespace CZ10BNetRecovery
                         seaPlacementReleased));
                 }
             }
-            if (elapsed >= 600f)
+            // Use simulated mission time for the long acceptance deadline. Near
+            // two loaded vessels KSP can run well below real time, especially in
+            // a hidden/background test; wall-clock timeout would reject a valid
+            // trajectory that is still advancing normally in physics time.
+            if (Planetarium.GetUniversalTime() - startUniversalTime >= 600d)
                 Report(false, hook);
         }
 
@@ -190,9 +214,13 @@ namespace CZ10BNetRecovery
             ExtendRanges(platform.vesselRanges.orbit);
             seaLatitude = platform.latitude;
             double startLongitude = platform.longitude;
-            seaLongitude = startLongitude + 0.60;
+            // Put the ship under the measured down-range arc. The old 6 km test
+            // position forced an unrealistic continuous boost-back immediately
+            // after separation; about 26 km preserves the apogee coast while
+            // leaving enough range to brake the horizontal velocity at terminal.
+            seaLongitude = startLongitude + 2.50;
             seaTerrainAltitude = TerrainAltitude(body, seaLatitude, seaLongitude);
-            for (double offset = 0.60; offset <= 3.00; offset += 0.20)
+            for (double offset = 2.50; offset <= 5.00; offset += 0.20)
             {
                 double candidateLongitude = startLongitude + offset;
                 double candidateTerrain = TerrainAltitude(body, seaLatitude,

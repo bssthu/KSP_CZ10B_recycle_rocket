@@ -1,8 +1,8 @@
 ship = CZ10B Two Stage Recovery Demo
 version = 1.12.5
-description = Three-part staged recovery demonstrator. Root is the programmable reusable booster; stage 1 ignites it and stage 0 decouples/ignites the upper stage.
+description = Reusable first stage with exposed engine, stock TD-25 interstage, integrated upper stage and a Protective Rocket Nose Cone Mk7.
 type = VAB
-size = 3,14.35,3
+size = 3,17,3
 steamPublishedFileId = 0
 persistentId = 2026071002
 rot = 0,0,0,1

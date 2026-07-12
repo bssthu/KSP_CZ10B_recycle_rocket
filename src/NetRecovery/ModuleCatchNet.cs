@@ -22,6 +22,11 @@ namespace CZ10BNetRecovery
         [KSPField] public float spring = 180000f;
         [KSPField] public float damper = 45000f;
         [KSPField] public float maximumForce = 2000000f;
+        [KSPField] public float openCableInset = 8f;
+        [KSPField] public float closedCableInset = 1.65f;
+        [KSPField] public float cableClosureSpeed = 2.5f;
+        [KSPField] public float closureHeight = 16f;
+        [KSPField] public float closureHalfWidth = 8f;
         [KSPField] public bool debugLogging = false;
 
         [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true,
@@ -37,6 +42,7 @@ namespace CZ10BNetRecovery
         private readonly List<LineRenderer> cableRenderers = new List<LineRenderer>();
         private double lastScan;
         private double lastDebug;
+        private float currentCableInset;
 
         [KSPEvent(guiActive = true, guiName = "Release captured stage", active = true)]
         public void ReleaseCapturedStage()
@@ -51,7 +57,9 @@ namespace CZ10BNetRecovery
             }
 
             captures.Clear();
-            netState = armed ? "Ready" : "Safe";
+            currentCableInset = openCableInset;
+            netState = armed ? "Open" : "Safe";
+            UpdateCableVisuals();
             ScreenMessages.PostScreenMessage("CZ-10B net: captured stage released", 4f,
                 ScreenMessageStyle.UPPER_CENTER);
         }
@@ -59,8 +67,12 @@ namespace CZ10BNetRecovery
         public override void OnStart(StartState state)
         {
             base.OnStart(state);
+            currentCableInset = openCableInset;
             if (HighLogic.LoadedSceneIsFlight || HighLogic.LoadedSceneIsEditor)
+            {
                 CreateCableVisuals();
+                UpdateCableVisuals();
+            }
         }
 
         public override void OnInactive()
@@ -101,6 +113,7 @@ namespace CZ10BNetRecovery
             lastScan = universalTime;
 
             PruneBrokenJoints();
+            UpdateCableClosure();
 
             foreach (Vessel candidate in FlightGlobals.VesselsLoaded)
             {
@@ -121,6 +134,11 @@ namespace CZ10BNetRecovery
                 }
 
                 if (hooks.Count == 0)
+                    continue;
+
+                // The four winch-driven lines must finish moving under the hook
+                // points before the physical capture slab is armed.
+                if (Math.Abs(currentCableInset - closedCableInset) > 0.15f)
                     continue;
 
                 ModuleCatchHook triggerHook = hooks.FirstOrDefault(h =>
@@ -262,7 +280,60 @@ namespace CZ10BNetRecovery
                     captures.Remove(vesselId);
             }
             if (captures.Count == 0 && netState.StartsWith("Captured", StringComparison.Ordinal))
-                netState = "Ready";
+                netState = armed ? "Open" : "Safe";
+        }
+
+        private void UpdateCableClosure()
+        {
+            if (captures.Count > 0)
+            {
+                currentCableInset = closedCableInset;
+                UpdateCableVisuals();
+                return;
+            }
+
+            bool requested = armed && ShouldCloseCables();
+            float targetInset = requested ? closedCableInset : openCableInset;
+            currentCableInset = Mathf.MoveTowards(currentCableInset, targetInset,
+                cableClosureSpeed * 0.05f);
+
+            if (!armed)
+                netState = "Safe";
+            else if (!requested)
+                netState = "Open";
+            else if (Math.Abs(currentCableInset - closedCableInset) <= 0.05f)
+                netState = "Closed";
+            else
+                netState = "Closing";
+            UpdateCableVisuals();
+        }
+
+        private bool ShouldCloseCables()
+        {
+            foreach (Vessel candidate in FlightGlobals.VesselsLoaded)
+            {
+                if (candidate == null || candidate == vessel || candidate.packed ||
+                    candidate.parts == null)
+                    continue;
+
+                List<Vector3> points = candidate.parts
+                    .Select(p => p.FindModuleImplementing<ModuleCatchHook>())
+                    .Where(h => h != null && h.armed)
+                    .SelectMany(h => h.GetHookWorldPoints())
+                    .Select(p => part.transform.InverseTransformPoint(p))
+                    .ToList();
+                if (points.Count == 0)
+                    continue;
+
+                Vector3 centre = points.Aggregate(Vector3.zero, (sum, p) => sum + p) /
+                                 points.Count;
+                float height = centre.y - planeOffset;
+                if (Math.Abs(centre.x) <= closureHalfWidth &&
+                    Math.Abs(centre.z) <= closureHalfWidth &&
+                    height >= -detectionDepth && height <= closureHeight)
+                    return true;
+            }
+            return false;
         }
 
         private void CreateCableVisuals()
@@ -271,27 +342,17 @@ namespace CZ10BNetRecovery
                 return;
 
             Color cableColor = new Color(0.95f, 0.75f, 0.12f, 1f);
-            float xInset = halfWidth * 0.32f;
-            float zInset = halfLength * 0.32f;
-            AddCable(new Vector3(-xInset, planeOffset, -halfLength),
-                new Vector3(-xInset, planeOffset, halfLength), cableColor);
-            AddCable(new Vector3(xInset, planeOffset, -halfLength),
-                new Vector3(xInset, planeOffset, halfLength), cableColor);
-            AddCable(new Vector3(-halfWidth, planeOffset, -zInset),
-                new Vector3(halfWidth, planeOffset, -zInset), cableColor);
-            AddCable(new Vector3(-halfWidth, planeOffset, zInset),
-                new Vector3(halfWidth, planeOffset, zInset), cableColor);
+            for (int index = 0; index < 4; ++index)
+                AddCable(cableColor);
         }
 
-        private void AddCable(Vector3 start, Vector3 end, Color color)
+        private void AddCable(Color color)
         {
             GameObject cable = new GameObject("CZ10B_CatchCable");
             cable.transform.SetParent(part.transform, false);
             LineRenderer renderer = cable.AddComponent<LineRenderer>();
             renderer.useWorldSpace = false;
-            renderer.positionCount = 2;
-            renderer.SetPosition(0, start);
-            renderer.SetPosition(1, end);
+            renderer.positionCount = 3;
             renderer.startWidth = 0.16f;
             renderer.endWidth = 0.16f;
             renderer.startColor = color;
@@ -302,6 +363,59 @@ namespace CZ10BNetRecovery
             if (shader != null)
                 renderer.material = new Material(shader) { color = color };
             cableRenderers.Add(renderer);
+        }
+
+        private void UpdateCableVisuals()
+        {
+            if (cableRenderers.Count != 4)
+                return;
+
+            float sagY = planeOffset;
+            if (captures.Count > 0)
+            {
+                List<Vector3> capturedPoints = FlightGlobals.VesselsLoaded
+                    .Where(v => v != null && captures.ContainsKey(v.id) && v.parts != null)
+                    .SelectMany(v => v.parts)
+                    .Select(p => p.FindModuleImplementing<ModuleCatchHook>())
+                    .Where(h => h != null && h.hookState == "Captured")
+                    .SelectMany(h => h.GetHookWorldPoints())
+                    .Select(p => part.transform.InverseTransformPoint(p))
+                    .ToList();
+                if (capturedPoints.Count > 0)
+                {
+                    float averageY = capturedPoints.Average(p => p.y);
+                    sagY = Mathf.Clamp(averageY, planeOffset - jointTravel, planeOffset);
+                }
+            }
+
+            float inset = Mathf.Clamp(currentCableInset, 0f,
+                Mathf.Min(halfWidth, halfLength));
+            SetCable(cableRenderers[0],
+                new Vector3(-inset, planeOffset, -halfLength),
+                new Vector3(-inset, sagY, 0f),
+                new Vector3(-inset, planeOffset, halfLength));
+            SetCable(cableRenderers[1],
+                new Vector3(inset, planeOffset, -halfLength),
+                new Vector3(inset, sagY, 0f),
+                new Vector3(inset, planeOffset, halfLength));
+            SetCable(cableRenderers[2],
+                new Vector3(-halfWidth, planeOffset, -inset),
+                new Vector3(0f, sagY, -inset),
+                new Vector3(halfWidth, planeOffset, -inset));
+            SetCable(cableRenderers[3],
+                new Vector3(-halfWidth, planeOffset, inset),
+                new Vector3(0f, sagY, inset),
+                new Vector3(halfWidth, planeOffset, inset));
+        }
+
+        private static void SetCable(LineRenderer renderer, Vector3 start,
+            Vector3 middle, Vector3 end)
+        {
+            if (renderer == null)
+                return;
+            renderer.SetPosition(0, start);
+            renderer.SetPosition(1, middle);
+            renderer.SetPosition(2, end);
         }
 
         private void DestroyCableVisuals()

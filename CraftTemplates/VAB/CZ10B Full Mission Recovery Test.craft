@@ -1,8 +1,8 @@
 ship = CZ10B Full Mission Recovery Test
 version = 1.12.5
-description = Integrated full-flight acceptance rig. kOS launches the offset two-stage vehicle to 18 km, separates the upper stage and returns the reusable booster to the four-cable net.
+description = Full sea-recovery demonstrator with TT18-A hold-downs, exposed first-stage engine, Mk7 upper-stage nose cone and a tall moving-cable recovery ship.
 type = VAB
-size = 36,25,30
+size = 36,50,30
 steamPublishedFileId = 0
 persistentId = 2026071501
 rot = 0,0,0,1
@@ -70,7 +70,7 @@ PART
 	modSize = 0,0,0
 	link = CZ10B-DemoBooster_2026071503
 	attN = bottom,CZ10B-RecoveryPlatform_2026071501_0|0|0
-	attN = top,CZ10B-DemoBooster_2026071503_0|18|8|0
+	attN = top,CZ10B-DemoBooster_2026071503_0|18|-6|0
 	EVENTS { }
 	ACTIONS { }
 	PARTDATA { }
@@ -80,9 +80,9 @@ PART
 	part = CZ10B-DemoBooster_2026071503
 	partName = Part
 	persistentId = 2026071503
-	pos = 18,24.78,0
-	attPos = 18,14.70,0
-	attPos0 = 18,24.78,0
+	pos = 18,10.78,0
+	attPos = 18,0.70,0
+	attPos0 = 18,10.78,0
 	rot = 0,0,0,1
 	attRot = 0,0,0,1
 	attRot0 = 0,0,0,1
@@ -101,6 +101,8 @@ PART
 	modMass = 0
 	modSize = 0,0,0
 	link = Decoupler.2_2026071504
+	link = launchClamp1_2026071507
+	link = launchClamp1_2026071508
 	attN = bottom,CZ10B-MissionLaunchRail_2026071502_0|-6.7|0
 	attN = top,Decoupler.2_2026071504_0|3.73|0
 	EVENTS { }
@@ -112,9 +114,9 @@ PART
 	part = Decoupler.2_2026071504
 	partName = Part
 	persistentId = 2026071504
-	pos = 18,28.61,0
+	pos = 18,14.61,0
 	attPos = 0,3.83,0
-	attPos0 = 18,28.61,0
+	attPos0 = 18,14.61,0
 	rot = 0,0,0,1
 	attRot = 0,0,0,1
 	attRot0 = 0,0,0,1
@@ -144,9 +146,9 @@ PART
 	part = CZ10B-DemoUpperStage_2026071505
 	partName = Part
 	persistentId = 2026071505
-	pos = 18,31.13,0
+	pos = 18,17.13,0
 	attPos = 0,2.52,0
-	attPos0 = 18,31.13,0
+	attPos0 = 18,17.13,0
 	rot = 0,0,0,1
 	attRot = 0,0,0,1
 	attRot0 = 0,0,0,1
@@ -165,6 +167,70 @@ PART
 	modMass = 0
 	modSize = 0,0,0
 	attN = bottom,Decoupler.2_2026071504_0|-2.42|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = launchClamp1_2026071507
+	partName = Part
+	persistentId = 2026071507
+	pos = 14.7,6.43,0
+	attPos = 0,0,0
+	attPos0 = 14.7,6.43,0
+	rot = 0,0.7071068,0,0.7071068
+	attRot = 0,0,0,1
+	attRot0 = 0,0.7071068,0,0.7071068
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = False
+	istg = 1
+	resPri = 0
+	dstg = 2
+	sidx = 0
+	sqor = 1
+	sepI = 1
+	attm = 1
+	sameVesselCollision = False
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	sym = launchClamp1_2026071508
+	srfN = srfAttach,CZ10B-DemoBooster_2026071503,COL3,0|1.354437|0.8069194,0|0|-1,0|1.354437|0.8069194
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = launchClamp1_2026071508
+	partName = Part
+	persistentId = 2026071508
+	pos = 21.3,6.43,0
+	attPos = 0,0,0
+	attPos0 = 21.3,6.43,0
+	rot = 0,0.7071068,0,-0.7071068
+	attRot = 0,0,0,1
+	attRot0 = 0,0.7071068,0,-0.7071068
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Off
+	rigidAttachment = False
+	istg = 1
+	resPri = 0
+	dstg = 2
+	sidx = 0
+	sqor = 1
+	sepI = 1
+	attm = 1
+	sameVesselCollision = False
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	sym = launchClamp1_2026071507
+	srfN = srfAttach,CZ10B-DemoBooster_2026071503,COL3,0|1.354437|0.8069194,0|0|-1,0|1.354437|0.8069194
 	EVENTS { }
 	ACTIONS { }
 	PARTDATA { }

@@ -3,5 +3,7 @@
 src/**/bin/
 src/**/obj/
 Ships/Script/cz10b/telemetry.csv
+__pycache__/
+*.pyc
 *.user
 *.suo

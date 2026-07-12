@@ -17,7 +17,15 @@ def read_rows(path: Path) -> list[dict[str, float | str]]:
     rows: list[dict[str, float | str]] = []
     with path.open(newline="", encoding="utf-8-sig") as stream:
         for raw in csv.reader(stream):
-            if not raw or raw[0] == "mission" or len(raw) < 10:
+            if not raw:
+                continue
+            # main.ks writes a fresh header at every launch while kOS appends to
+            # the same archive. Keep only the newest header-delimited flight;
+            # sandbox saves often reuse the same universal-time mission number.
+            if raw[0] == "mission":
+                rows.clear()
+                continue
+            if len(raw) < 10:
                 continue
             try:
                 row: dict[str, float | str] = {"mission": raw[0], "phase": raw[1]}
@@ -40,13 +48,20 @@ def main() -> int:
         print("no numeric telemetry rows found")
         return 2
     mission = rows[-1]["mission"]
-    phase = "RETURN"
-    flight = [row for row in rows if row["mission"] == mission and row["phase"] == phase]
+    mission_rows = [row for row in rows if row["mission"] == mission]
+    phase_counts = {
+        name: sum(row["phase"] == name for row in mission_rows)
+        for name in ("ASCENT", "COAST", "BOOSTBACK", "ENTRY", "TERMINAL")
+    }
+    phase = next(
+        (name for name in ("TERMINAL", "HOVER_TEST", "RETURN")
+         if any(row["phase"] == name for row in mission_rows)),
+        "",
+    )
+    flight = [row for row in mission_rows if row["phase"] == phase]
     if not flight:
-        phase = "HOVER_TEST"
-        flight = [row for row in rows if row["mission"] == mission and row["phase"] == phase]
-    if not flight:
-        print(f"mission={mission}: no RETURN or HOVER_TEST samples")
+        present = sorted({str(row["phase"]) for row in mission_rows})
+        print(f"mission={mission}: no terminal samples; present={present}")
         return 1
 
     # The controller may intentionally hover or climb after an early centerline
@@ -59,6 +74,9 @@ def main() -> int:
     max_tilt_low = max(float(row["tilt"]) for row in low or flight)
 
     print(f"mission={mission} phase={phase} samples={len(flight)}")
+    print("phase_samples=" + ",".join(
+        f"{name}:{count}" for name, count in phase_counts.items() if count
+    ))
     print(f"entry hook_height={float(entry['hook_height']):.2f} m "
           f"vertical={float(entry['v_vertical']):.2f} m/s "
           f"lateral={float(entry['v_horizontal']):.2f} m/s "
@@ -68,8 +86,8 @@ def main() -> int:
     print(f"max_tilt_below_100m={max_tilt_low:.1f} deg")
 
     hints: list[str] = []
-    if phase == "RETURN" and float(entry["v_vertical"]) < -5:
-        hints.append("late vertical burn: raise BURN_ALTITUDE_MARGIN by 15-30 m")
+    if phase in {"RETURN", "TERMINAL"} and float(entry["v_vertical"]) < -5:
+        hints.append("terminal descent still fast: start the single ENTRY burn earlier or extend its maximum time")
     if saturated > 0.25:
         hints.append("insufficient control authority: reduce landing mass or use a stronger engine")
     if float(entry["h_error"]) > 8 and float(entry["v_horizontal"]) < 2:
