@@ -2,7 +2,7 @@ ship = CZ10B Cable Capture Drop Test
 version = 1.12.5
 description = Launch-pad physics acceptance rig. Launch, wait for physics to settle, then press Space once to release the instrumented mass into the four-cable net.
 type = VAB
-size = 30,12,30
+size = 30,45,30
 steamPublishedFileId = 0
 persistentId = 2026071003
 rot = 0,0,0,1
@@ -70,7 +70,7 @@ PART
 	modSize = 0,0,0
 	link = Decoupler.2_2026071303
 	attN = bottom,CZ10B-RecoveryPlatform_2026071301_0|0|0
-	attN = top,Decoupler.2_2026071303_0|1|0
+	attN = top,Decoupler.2_2026071303_0|31|0
 	EVENTS { }
 	ACTIONS { }
 	PARTDATA { }
@@ -80,9 +80,9 @@ PART
 	part = Decoupler.2_2026071303
 	partName = Part
 	persistentId = 2026071303
-	pos = 0,11.18,0
-	attPos = 0,1.10,0
-	attPos0 = 0,11.18,0
+	pos = 0,41.18,0
+	attPos = 0,31.10,0
+	attPos0 = 0,41.18,0
 	rot = 0,0,0,1
 	attRot = 0,0,0,1
 	attRot0 = 0,0,0,1
@@ -112,9 +112,9 @@ PART
 	part = CZ10B-DropTestMass_2026071304
 	partName = Part
 	persistentId = 2026071304
-	pos = 0,15.01,0
+	pos = 0,45.01,0
 	attPos = 0,3.83,0
-	attPos0 = 0,15.01,0
+	attPos0 = 0,45.01,0
 	rot = 0,0,0,1
 	attRot = 0,0,0,1
 	attRot0 = 0,0,0,1

@@ -22,6 +22,23 @@ FUNCTION COAST_TIME_TO_HEIGHT {
         + 2 * GRAVITY * DH, 0))) / MAX(GRAVITY, 0.001), 1).
 }
 
+FUNCTION BOOSTER_PROPELLANT_FRACTION {
+    // Read only the integrated first-stage tanks. SHIP:LIQUIDFUEL would also
+    // include the upper stage and cannot enforce a recovery reserve.
+    LOCAL BOOSTERS IS SHIP:PARTSNAMED("CZ10B-DemoBooster").
+    IF BOOSTERS:LENGTH = 0 { RETURN 0. }
+    LOCAL AMOUNT IS 0.
+    LOCAL CAPACITY IS 0.
+    FOR RESOURCE IN BOOSTERS[0]:RESOURCES {
+        IF RESOURCE:NAME = "LiquidFuel" OR RESOURCE:NAME = "Oxidizer" {
+            SET AMOUNT TO AMOUNT + RESOURCE:AMOUNT.
+            SET CAPACITY TO CAPACITY + RESOURCE:CAPACITY.
+        }
+    }
+    IF CAPACITY <= 0 { RETURN 0. }
+    RETURN AMOUNT / CAPACITY.
+}
+
 FUNCTION FIND_RECOVERY_SHIP {
     PARAMETER WANTED_NAME.
     LOCAL FOUND IS 0.

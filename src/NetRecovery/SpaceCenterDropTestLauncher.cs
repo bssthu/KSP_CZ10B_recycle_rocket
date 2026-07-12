@@ -60,10 +60,41 @@ namespace CZ10BNetRecovery
                 return;
 
             saveName = File.ReadAllText(marker).Trim();
+            SetNextKscLocalNoon();
             readyAt = Time.realtimeSinceStartup + 3f;
             pending = true;
             Debug.Log("[CZ10BNetRecovery] " + logPrefix +
                       "_SPACECENTER_READY save=" + saveName);
+        }
+
+        private static void SetNextKscLocalNoon()
+        {
+            CelestialBody kerbin = FlightGlobals.GetBodyByName("Kerbin");
+            CelestialBody sun = FlightGlobals.GetBodyByName("Sun");
+            if (kerbin == null || sun == null || kerbin.rotationPeriod <= 0)
+                return;
+
+            const double kscLatitude = -0.0972;
+            const double kscLongitude = -74.5577;
+            Vector3d surface = kerbin.GetWorldSurfacePosition(kscLatitude,
+                kscLongitude, 0);
+            Vector3d axis = kerbin.transform.up.normalized;
+            Vector3d localUp = (surface - kerbin.position).normalized;
+            Vector3d sunDirection = (sun.position - kerbin.position).normalized;
+            Vector3d upPlane = Vector3d.Exclude(axis, localUp).normalized;
+            Vector3d sunPlane = Vector3d.Exclude(axis, sunDirection).normalized;
+            double angle = Math.Atan2(Vector3d.Dot(axis,
+                Vector3d.Cross(upPlane, sunPlane)),
+                Vector3d.Dot(upPlane, sunPlane));
+            if (angle < 0)
+                angle += Math.PI * 2;
+            double delta = angle / (Math.PI * 2) * kerbin.rotationPeriod;
+            if (delta < 60)
+                delta += kerbin.rotationPeriod;
+            Planetarium.SetUniversalTime(Planetarium.GetUniversalTime() + delta);
+            Debug.Log(string.Format(
+                "[CZ10BNetRecovery] KSC_LOCAL_NOON_SET delta={0:F0}s ut={1:F0}",
+                delta, Planetarium.GetUniversalTime()));
         }
 
         private void Update()

@@ -17,6 +17,7 @@ namespace CZ10BNetRecovery
         private bool reported;
         private float startRealtime;
         private float capturedAt = -1f;
+        private float stableCapturedAt = -1f;
         private float nextDiagnostic;
         private bool everPowered;
 
@@ -80,12 +81,30 @@ namespace CZ10BNetRecovery
             {
                 if (capturedAt < 0f)
                     capturedAt = elapsed;
-                if (elapsed - capturedAt >= 8f && everPowered)
+                ModuleCatchNet net = FindNet();
+                float angularRate = boosterVessel == null ? float.MaxValue :
+                    boosterVessel.angularVelocity.magnitude * Mathf.Rad2Deg;
+                bool payoutComplete = net != null &&
+                    net.cableDeflection >= net.captureSettleDrop - 1f;
+                bool stable = boosterVessel != null &&
+                    Mathf.Abs((float)boosterVessel.verticalSpeed) <= 4f &&
+                    boosterVessel.horizontalSrfSpeed <= 3f && angularRate <= 12f &&
+                    payoutComplete;
+                if (stable)
+                {
+                    if (stableCapturedAt < 0f)
+                        stableCapturedAt = elapsed;
+                }
+                else
+                    stableCapturedAt = -1f;
+                if (stableCapturedAt >= 0f && elapsed - stableCapturedAt >= 8f &&
+                    everPowered)
                     ReportPass(hook);
             }
             else
             {
                 capturedAt = -1f;
+                stableCapturedAt = -1f;
             }
 
             if (elapsed >= 82f)
@@ -162,11 +181,13 @@ namespace CZ10BNetRecovery
                 hook == null ? booster.transform.position : hook.GetHookWorldPoints().First());
             ModuleEngines engine = FindEngine(booster);
             Debug.Log(string.Format(
-                "[CZ10BNetRecovery] HOVER_TEST_STATUS t={0:F1} local=({1:F2},{2:F2},{3:F2}) vertical={4:F2} lateral={5:F2} throttle={6:F3} thrust={7:F1} hookState={8}",
+                "[CZ10BNetRecovery] HOVER_TEST_STATUS t={0:F1} local=({1:F2},{2:F2},{3:F2}) vertical={4:F2} lateral={5:F2} throttle={6:F3} thrust={7:F1} hookState={8} angular={9:F2} sag={10:F2}",
                 elapsed, local.x, local.y, local.z, vertical, lateral.magnitude,
                 engine == null ? 0f : engine.currentThrottle,
                 engine == null ? 0f : engine.finalThrust,
-                hook == null ? "missing" : hook.hookState));
+                hook == null ? "missing" : hook.hookState,
+                booster.angularVelocity.magnitude * Mathf.Rad2Deg,
+                net.cableDeflection));
         }
 
         private static bool HasPart(Vessel vessel, string name)

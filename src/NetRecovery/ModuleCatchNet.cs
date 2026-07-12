@@ -19,14 +19,20 @@ namespace CZ10BNetRecovery
         [KSPField] public float maxLateralSpeed = 4f;
         [KSPField] public float maxTilt = 15f;
         [KSPField] public float jointTravel = 1.5f;
+        [KSPField] public float jointSlack = 0.75f;
         [KSPField] public float spring = 180000f;
         [KSPField] public float damper = 45000f;
         [KSPField] public float maximumForce = 2000000f;
         [KSPField] public float captureSettleDrop = 0.75f;
+        [KSPField] public float captureSettleSpeed = 2.5f;
+        [KSPField] public float captureLinearDamping = 3f;
+        [KSPField] public float captureAngularDamping = 5f;
         [KSPField] public float openCableInset = 8f;
         [KSPField] public float closedCableInset = 1.65f;
         [KSPField] public float cableClosureSpeed = 2.5f;
         [KSPField] public float cableTrackingSpeed = 5f;
+        [KSPField] public float cableAnchorHalfWidth = -1f;
+        [KSPField] public float cableAnchorHalfLength = -1f;
         [KSPField] public float closureHeight = 16f;
         [KSPField] public float closureHalfWidth = 8f;
         [KSPField] public bool debugLogging = false;
@@ -49,8 +55,23 @@ namespace CZ10BNetRecovery
 
         private readonly Dictionary<Guid, List<ConfigurableJoint>> captures =
             new Dictionary<Guid, List<ConfigurableJoint>>();
+        private readonly Dictionary<Guid, Vessel> capturedStages =
+            new Dictionary<Guid, Vessel>();
+        private sealed class CaptureTether
+        {
+            public ConfigurableJoint joint;
+            public Rigidbody winchBody;
+            public Guid vesselId;
+            public Vector3 currentWorld;
+            public Vector3 settledWorld;
+            public Vector3 commandedVelocity;
+        }
+
+        private readonly Dictionary<ConfigurableJoint, CaptureTether> captureTethers =
+            new Dictionary<ConfigurableJoint, CaptureTether>();
         private readonly List<LineRenderer> cableRenderers = new List<LineRenderer>();
         private double lastScan;
+        private double lastTetherUpdate;
         private double lastDebug;
         private float currentCableInset;
         private Vector2 currentCableCentre;
@@ -68,6 +89,8 @@ namespace CZ10BNetRecovery
             }
 
             captures.Clear();
+            capturedStages.Clear();
+            DestroyCaptureTethers();
             currentCableInset = openCableInset;
             currentCableCentre = Vector2.zero;
             cableTrackingError = 0f;
@@ -99,6 +122,7 @@ namespace CZ10BNetRecovery
 
         public void OnDestroy()
         {
+            DestroyCaptureTethers();
             DestroyCableVisuals();
         }
 
@@ -107,15 +131,19 @@ namespace CZ10BNetRecovery
             base.OnFixedUpdate();
 
             double universalTime = Planetarium.GetUniversalTime();
+            float tetherDeltaTime = UpdateCaptureSettling(universalTime);
+            DampCapturedStages(tetherDeltaTime);
             if (debugLogging && universalTime - lastDebug >= 0.5)
             {
                 lastDebug = universalTime;
                 Debug.Log(string.Format(
-                    "[CZ10BNetRecovery] NET_HEARTBEAT armed={0} part={1} vessel={2} packed={3} rb={4} loadedVessels={5}",
+                    "[CZ10BNetRecovery] NET_HEARTBEAT armed={0} part={1} vessel={2} packed={3} rb={4} loadedVessels={5} state={6} inset={7:F2} centre=({8:F2},{9:F2})",
                     armed, part != null, vessel != null,
                     vessel != null && vessel.packed,
                     part != null && part.Rigidbody != null,
-                    FlightGlobals.VesselsLoaded == null ? -1 : FlightGlobals.VesselsLoaded.Count));
+                    FlightGlobals.VesselsLoaded == null ? -1 : FlightGlobals.VesselsLoaded.Count,
+                    netState, currentCableInset, currentCableCentre.x,
+                    currentCableCentre.y));
             }
 
             if (!HighLogic.LoadedSceneIsFlight || !armed || part == null || vessel == null ||
@@ -167,12 +195,18 @@ namespace CZ10BNetRecovery
                 if (triggerHook == null)
                     continue;
 
-                Vector3 relativeVelocity = (Vector3)(candidate.srf_velocity - vessel.srf_velocity);
-                float normalSpeed = Vector3.Dot(relativeVelocity, part.transform.up);
-                Vector3 lateralVelocity = relativeVelocity - normalSpeed * part.transform.up;
+                // The recovery ship is held fixed in Kerbin's rotating surface
+                // frame. candidate.srf_velocity is therefore already the stage
+                // velocity relative to the platform. Subtracting the inactive
+                // ship's velocity adds the planet's ~175 m/s rotation a second
+                // time (the same rule is used by the kOS terminal controller).
+                Vector3 relativeVelocity = (Vector3)candidate.srf_velocity;
+                Vector3 netUp = NetUp();
+                float normalSpeed = Vector3.Dot(relativeVelocity, netUp);
+                Vector3 lateralVelocity = relativeVelocity - normalSpeed * netUp;
                 float tilt = candidate.ReferenceTransform == null
                     ? 0f
-                    : Vector3.Angle(candidate.ReferenceTransform.up, part.transform.up);
+                    : Vector3.Angle(candidate.ReferenceTransform.up, netUp);
 
                 bool descending = normalSpeed < -0.05f;
                 bool withinEnvelope = descending && -normalSpeed <= maxClosingSpeed &&
@@ -201,7 +235,7 @@ namespace CZ10BNetRecovery
 
         private bool IsPointInsideCaptureSlab(Vector3 worldPoint)
         {
-            Vector3 local = part.transform.InverseTransformPoint(worldPoint);
+            Vector3 local = WorldToNet(worldPoint);
             float height = local.y - planeOffset;
             return Math.Abs(local.x) <= halfWidth &&
                    Math.Abs(local.z) <= halfLength &&
@@ -230,34 +264,52 @@ namespace CZ10BNetRecovery
                 foreach (Vector3 hookWorld in hook.GetHookWorldPoints().Where(IsPointOverNet))
                 {
                     ConfigurableJoint joint = hook.part.gameObject.AddComponent<ConfigurableJoint>();
-                    joint.connectedBody = part.Rigidbody;
+                    // Do not feed the cable reaction into the dynamically
+                    // positioned recovery ship. A physical joint attached
+                    // directly to the ship fought the DP station keeper and
+                    // injected enough energy to roll the platform and spin the
+                    // captured stage. Each line therefore terminates at a
+                    // kinematic winch point which follows the ship's local net
+                    // frame but absorbs the equal-and-opposite joint force.
+                    GameObject winchObject = new GameObject(
+                        "CZ10B kinematic winch anchor");
+                    winchObject.transform.position = hookWorld;
+                    Rigidbody winchBody = winchObject.AddComponent<Rigidbody>();
+                    winchBody.isKinematic = true;
+                    winchBody.useGravity = false;
+                    winchBody.detectCollisions = false;
+                    joint.connectedBody = winchBody;
                     joint.autoConfigureConnectedAnchor = false;
                     joint.anchor = hook.part.transform.InverseTransformPoint(hookWorld);
-                    // Establish the loaded rope equilibrium below the contact
-                    // plane. This models the short elastic drop visible after
-                    // the real frame takes the stage weight, rather than
-                    // pinning it at the first collision sample.
-                    Vector3 settledWorld = hookWorld - part.transform.up * captureSettleDrop;
-                    joint.connectedAnchor = part.transform.InverseTransformPoint(settledWorld);
+                    // Establish one loaded equilibrium relative to the cable
+                    // plane, independent of where inside the compliant sweep
+                    // volume contact happened. A later edge capture therefore
+                    // cannot add its detection depth to the intended rope sag.
+                    Vector3 settledLocal = WorldToNet(hookWorld);
+                    settledLocal.y = planeOffset - captureSettleDrop;
+                    Vector3 settledWorld = NetToWorld(settledLocal);
+                    // Start with zero geometric error. The winch then pays the
+                    // line out gradually, avoiding a destructive 17 m impulse
+                    // on the full-size booster in the first physics frame.
+                    joint.connectedAnchor = Vector3.zero;
 
                     joint.xMotion = ConfigurableJointMotion.Limited;
                     joint.yMotion = ConfigurableJointMotion.Limited;
                     joint.zMotion = ConfigurableJointMotion.Limited;
-                    joint.angularXMotion = ConfigurableJointMotion.Limited;
-                    joint.angularYMotion = ConfigurableJointMotion.Limited;
-                    joint.angularZMotion = ConfigurableJointMotion.Limited;
+                    // Four separated linear hook points already provide the
+                    // stabilising moment. Repeating angular constraints on all
+                    // four joints over-constrains a tilted full-size stage.
+                    joint.angularXMotion = ConfigurableJointMotion.Free;
+                    joint.angularYMotion = ConfigurableJointMotion.Free;
+                    joint.angularZMotion = ConfigurableJointMotion.Free;
 
                     SoftJointLimit linearLimit = joint.linearLimit;
-                    linearLimit.limit = jointTravel;
+                    // jointTravel is the total cable sweep/sag envelope, not
+                    // extra rope slack. Keep each hook close to the moving
+                    // winch anchor so it cannot free-fall another 18.5 m and
+                    // snap into the limit at destructive speed.
+                    linearLimit.limit = jointSlack;
                     joint.linearLimit = linearLimit;
-
-                    SoftJointLimit angularLimit = joint.lowAngularXLimit;
-                    angularLimit.limit = -maxTilt;
-                    joint.lowAngularXLimit = angularLimit;
-                    angularLimit.limit = maxTilt;
-                    joint.highAngularXLimit = angularLimit;
-                    joint.angularYLimit = angularLimit;
-                    joint.angularZLimit = angularLimit;
 
                     JointDrive drive = new JointDrive
                     {
@@ -274,6 +326,14 @@ namespace CZ10BNetRecovery
                     joint.enableCollision = false;
 
                     joints.Add(joint);
+                    captureTethers[joint] = new CaptureTether
+                    {
+                        joint = joint,
+                        winchBody = winchBody,
+                        vesselId = candidate.id,
+                        currentWorld = hookWorld,
+                        settledWorld = settledWorld
+                    };
                 }
                 hook.SetCaptured(true);
             }
@@ -282,6 +342,7 @@ namespace CZ10BNetRecovery
                 return;
 
             captures[candidate.id] = joints;
+            capturedStages[candidate.id] = candidate;
             netState = "Captured: " + candidate.vesselName;
             ScreenMessages.PostScreenMessage(
                 string.Format("NET CAPTURE: {0} ({1} hooks)", candidate.vesselName, joints.Count),
@@ -293,7 +354,7 @@ namespace CZ10BNetRecovery
 
         private bool IsPointOverNet(Vector3 worldPoint)
         {
-            Vector3 local = part.transform.InverseTransformPoint(worldPoint);
+            Vector3 local = WorldToNet(worldPoint);
             return Math.Abs(local.x) <= halfWidth && Math.Abs(local.z) <= halfLength &&
                    Math.Abs(local.y - planeOffset) <= detectionDepth * 3f;
         }
@@ -304,10 +365,104 @@ namespace CZ10BNetRecovery
             {
                 captures[vesselId].RemoveAll(j => j == null);
                 if (captures[vesselId].Count == 0)
+                {
                     captures.Remove(vesselId);
+                    capturedStages.Remove(vesselId);
+                }
             }
             if (captures.Count == 0 && netState.StartsWith("Captured", StringComparison.Ordinal))
                 netState = armed ? "Open" : "Safe";
+            foreach (KeyValuePair<ConfigurableJoint, CaptureTether> entry in
+                     captureTethers.ToList())
+            {
+                if (entry.Key != null)
+                    continue;
+                if (entry.Value.winchBody != null)
+                    UnityEngine.Object.Destroy(entry.Value.winchBody.gameObject);
+                captureTethers.Remove(entry.Key);
+            }
+        }
+
+        private float UpdateCaptureSettling(double universalTime)
+        {
+            float deltaTime = lastTetherUpdate <= 0d ? 0f :
+                Mathf.Clamp((float)(universalTime - lastTetherUpdate), 0f, 0.05f);
+            lastTetherUpdate = universalTime;
+            if (deltaTime <= 0f)
+                return 0f;
+            foreach (KeyValuePair<ConfigurableJoint, CaptureTether> entry in
+                     captureTethers.ToList())
+            {
+                ConfigurableJoint joint = entry.Key;
+                CaptureTether tether = entry.Value;
+                if (joint == null || tether.winchBody == null)
+                {
+                    if (tether.winchBody != null)
+                        UnityEngine.Object.Destroy(tether.winchBody.gameObject);
+                    captureTethers.Remove(joint);
+                    continue;
+                }
+                // Freeze the payout path in the capture-time world frame.
+                // Recomputing it from the DP-positioned platform every frame
+                // converted its sub-metre station corrections into periodic
+                // 100+ m/s kinematic-anchor impulses.
+                Vector3 commandedPosition = Vector3.MoveTowards(
+                    tether.currentWorld, tether.settledWorld,
+                    captureSettleSpeed * deltaTime);
+                tether.commandedVelocity =
+                    (commandedPosition - tether.currentWorld) / deltaTime;
+                tether.currentWorld = commandedPosition;
+                tether.winchBody.MovePosition(commandedPosition);
+            }
+            return deltaTime;
+        }
+
+        private void DampCapturedStages(float deltaTime)
+        {
+            if (deltaTime <= 0f)
+                return;
+            foreach (KeyValuePair<Guid, Vessel> entry in capturedStages.ToList())
+            {
+                Vessel stage = entry.Value;
+                if (stage == null || stage.state == Vessel.State.DEAD ||
+                    stage.packed || stage.rootPart == null ||
+                    stage.rootPart.Rigidbody == null)
+                {
+                    capturedStages.Remove(entry.Key);
+                    continue;
+                }
+
+                List<CaptureTether> stageTethers = captureTethers.Values
+                    .Where(t => t.vesselId == entry.Key && t.winchBody != null)
+                    .ToList();
+                if (stageTethers.Count == 0)
+                    continue;
+                Vector3 winchVelocity = stageTethers.Aggregate(Vector3.zero,
+                    (sum, tether) => sum + tether.commandedVelocity) /
+                    stageTethers.Count;
+                Vector3 stageVelocity = stage.rootPart.Rigidbody.velocity;
+                float linearBlend = 1f - Mathf.Exp(-captureLinearDamping * deltaTime);
+                Vector3 velocityCorrection =
+                    (winchVelocity - stageVelocity) * linearBlend;
+                float angularScale = Mathf.Exp(-captureAngularDamping * deltaTime);
+                foreach (Part stagePart in stage.parts)
+                {
+                    if (stagePart == null || stagePart.Rigidbody == null)
+                        continue;
+                    stagePart.Rigidbody.velocity += velocityCorrection;
+                    stagePart.Rigidbody.angularVelocity *= angularScale;
+                }
+            }
+        }
+
+        private void DestroyCaptureTethers()
+        {
+            foreach (CaptureTether tether in captureTethers.Values)
+            {
+                if (tether.winchBody != null)
+                    UnityEngine.Object.Destroy(tether.winchBody.gameObject);
+            }
+            captureTethers.Clear();
         }
 
         private void UpdateCableClosure()
@@ -358,7 +513,7 @@ namespace CZ10BNetRecovery
                     .Select(p => p.FindModuleImplementing<ModuleCatchHook>())
                     .Where(h => h != null && h.armed)
                     .SelectMany(h => h.GetHookWorldPoints())
-                    .Select(p => part.transform.InverseTransformPoint(p))
+                    .Select(WorldToNet)
                     .ToList();
                 if (points.Count == 0)
                     continue;
@@ -366,8 +521,21 @@ namespace CZ10BNetRecovery
                 Vector3 centre = points.Aggregate(Vector3.zero, (sum, p) => sum + p) /
                                  points.Count;
                 float height = centre.y - planeOffset;
-                if (Math.Abs(centre.x) <= closureHalfWidth &&
-                    Math.Abs(centre.z) <= closureHalfWidth &&
+                if (debugLogging && Planetarium.GetUniversalTime() - lastDebug < 0.03)
+                {
+                    Debug.Log(string.Format(
+                        "[CZ10BNetRecovery] NET_TARGET name={0} net=({1:F2},{2:F2},{3:F2}) height={4:F2} bounds=({5:F1},{6:F1})",
+                        candidate.vesselName, centre.x, centre.y, centre.z,
+                        height, closureHalfWidth, closureHeight));
+                }
+                // Once the lines are closed, retain the target through a modest
+                // transient sway instead of reopening the cradle at the worst
+                // possible moment. Initial acquisition keeps the tighter bounds.
+                float activeHalfWidth = closureHalfWidth;
+                if (currentCableInset <= closedCableInset + 0.15f)
+                    activeHalfWidth += 5f;
+                if (Math.Abs(centre.x) <= activeHalfWidth &&
+                    Math.Abs(centre.z) <= activeHalfWidth &&
                     height >= -jointTravel - detectionDepth && height <= closureHeight)
                 {
                     float distance = Mathf.Abs(height);
@@ -400,7 +568,7 @@ namespace CZ10BNetRecovery
         private bool HooksInsideTrackedCradle(List<ModuleCatchHook> hooks)
         {
             List<Vector3> points = hooks.SelectMany(h => h.GetHookWorldPoints())
-                .Select(p => part.transform.InverseTransformPoint(p)).ToList();
+                .Select(WorldToNet).ToList();
             if (points.Count == 0)
                 return false;
             Vector3 centre = points.Aggregate(Vector3.zero, (sum, p) => sum + p) /
@@ -423,7 +591,9 @@ namespace CZ10BNetRecovery
             GameObject cable = new GameObject("CZ10B_CatchCable");
             cable.transform.SetParent(part.transform, false);
             LineRenderer renderer = cable.AddComponent<LineRenderer>();
-            renderer.useWorldSpace = false;
+            // Express the cable in an explicit local-surface frame. Part-local
+            // Y is not a reliable deck normal after sea deployment or buoyancy.
+            renderer.useWorldSpace = true;
             renderer.positionCount = 3;
             renderer.startWidth = 0.16f;
             renderer.endWidth = 0.16f;
@@ -451,7 +621,7 @@ namespace CZ10BNetRecovery
                     .Select(p => p.FindModuleImplementing<ModuleCatchHook>())
                     .Where(h => h != null && h.hookState == "Captured")
                     .SelectMany(h => h.GetHookWorldPoints())
-                    .Select(p => part.transform.InverseTransformPoint(p))
+                    .Select(WorldToNet)
                     .ToList();
                 if (capturedPoints.Count > 0)
                 {
@@ -465,32 +635,79 @@ namespace CZ10BNetRecovery
                 Mathf.Min(halfWidth, halfLength));
             float centreX = currentCableCentre.x;
             float centreZ = currentCableCentre.y;
+            float anchorWidth = cableAnchorHalfWidth > 0f
+                ? cableAnchorHalfWidth : halfWidth;
+            float anchorLength = cableAnchorHalfLength > 0f
+                ? cableAnchorHalfLength : halfLength;
             SetCable(cableRenderers[0],
-                new Vector3(centreX - inset, planeOffset, -halfLength),
+                new Vector3(centreX - inset, planeOffset, -anchorLength),
                 new Vector3(centreX - inset, sagY, centreZ),
-                new Vector3(centreX - inset, planeOffset, halfLength));
+                new Vector3(centreX - inset, planeOffset, anchorLength));
             SetCable(cableRenderers[1],
-                new Vector3(centreX + inset, planeOffset, -halfLength),
+                new Vector3(centreX + inset, planeOffset, -anchorLength),
                 new Vector3(centreX + inset, sagY, centreZ),
-                new Vector3(centreX + inset, planeOffset, halfLength));
+                new Vector3(centreX + inset, planeOffset, anchorLength));
             SetCable(cableRenderers[2],
-                new Vector3(-halfWidth, planeOffset, centreZ - inset),
+                new Vector3(-anchorWidth, planeOffset, centreZ - inset),
                 new Vector3(centreX, sagY, centreZ - inset),
-                new Vector3(halfWidth, planeOffset, centreZ - inset));
+                new Vector3(anchorWidth, planeOffset, centreZ - inset));
             SetCable(cableRenderers[3],
-                new Vector3(-halfWidth, planeOffset, centreZ + inset),
+                new Vector3(-anchorWidth, planeOffset, centreZ + inset),
                 new Vector3(centreX, sagY, centreZ + inset),
-                new Vector3(halfWidth, planeOffset, centreZ + inset));
+                new Vector3(anchorWidth, planeOffset, centreZ + inset));
         }
 
-        private static void SetCable(LineRenderer renderer, Vector3 start,
+        private void SetCable(LineRenderer renderer, Vector3 start,
             Vector3 middle, Vector3 end)
         {
             if (renderer == null)
                 return;
-            renderer.SetPosition(0, start);
-            renderer.SetPosition(1, middle);
-            renderer.SetPosition(2, end);
+            renderer.SetPosition(0, NetToWorld(start));
+            renderer.SetPosition(1, NetToWorld(middle));
+            renderer.SetPosition(2, NetToWorld(end));
+        }
+
+        private Vector3 NetUp()
+        {
+            if (part == null || vessel == null || vessel.mainBody == null)
+                return part == null ? Vector3.up : part.transform.up;
+            Vector3 up = (part.transform.position -
+                (Vector3)vessel.mainBody.position).normalized;
+            return up.sqrMagnitude > 0.5f ? up : part.transform.up;
+        }
+
+        private void NetAxes(out Vector3 right, out Vector3 up,
+            out Vector3 forward)
+        {
+            up = NetUp();
+            right = Vector3.ProjectOnPlane(part.transform.right, up).normalized;
+            if (right.sqrMagnitude < 0.5f)
+            {
+                forward = Vector3.ProjectOnPlane(part.transform.forward, up).normalized;
+                right = Vector3.Cross(up, forward).normalized;
+            }
+            forward = Vector3.Cross(right, up).normalized;
+        }
+
+        private Vector3 WorldToNet(Vector3 worldPoint)
+        {
+            Vector3 right;
+            Vector3 up;
+            Vector3 forward;
+            NetAxes(out right, out up, out forward);
+            Vector3 delta = worldPoint - part.transform.position;
+            return new Vector3(Vector3.Dot(delta, right),
+                Vector3.Dot(delta, up), Vector3.Dot(delta, forward));
+        }
+
+        private Vector3 NetToWorld(Vector3 netPoint)
+        {
+            Vector3 right;
+            Vector3 up;
+            Vector3 forward;
+            NetAxes(out right, out up, out forward);
+            return part.transform.position + right * netPoint.x
+                + up * netPoint.y + forward * netPoint.z;
         }
 
         private void DestroyCableVisuals()

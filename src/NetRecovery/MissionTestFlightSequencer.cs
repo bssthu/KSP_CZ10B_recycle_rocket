@@ -18,9 +18,11 @@ namespace CZ10BNetRecovery
         private bool everPowered;
         private bool reachedAltitude;
         private bool upperSeparated;
+        private float separationPropellantFraction = -1f;
         private float startRealtime;
         private double startUniversalTime;
         private float capturedAt = -1f;
+        private float stableCapturedAt = -1f;
         private float nextStatus;
         private bool seaMission;
         private Vessel pendingSeaPlatform;
@@ -29,9 +31,14 @@ namespace CZ10BNetRecovery
         private double seaLatitude;
         private double seaLongitude;
         private double seaTerrainAltitude;
+        private double seaStationAltitude = 5.5d;
         private bool seaPlacementReleased;
         private float seaReleaseAt;
         private float maxHighAngularRate;
+        private bool upperInsertionReleased;
+        private bool upperCutoffCommanded;
+        private bool seaStationDeferred;
+        private Quaternion seaSurfaceRotationOffset = Quaternion.identity;
 
         private void Start()
         {
@@ -76,10 +83,15 @@ namespace CZ10BNetRecovery
                           pendingSeaPlatform.vesselName);
                 pendingSeaPlatform = null;
             }
-            if (seaPlatform != null && !seaPlacementReleased)
-                MaintainSeaPlatform();
-
             Vessel booster = FindVesselWithPart("CZ10B-DemoBooster");
+            if (seaPlatform != null)
+            {
+                if (!seaPlacementReleased)
+                    MaintainSeaPlatform();
+                else
+                    ManageSeaStationLoading(booster);
+            }
+
             if (booster != null)
             {
                 reachedAltitude |= booster.altitude > 2000;
@@ -92,11 +104,49 @@ namespace CZ10BNetRecovery
                 everPowered |= engine != null && engine.finalThrust > 10f;
             }
             Vessel upper = FindVesselWithPart("CZ10B-DemoUpperStage");
-            upperSeparated |= upper != null && booster != null && upper != booster;
+            bool separatedNow = upper != null && booster != null && upper != booster;
+            if (separatedNow && !upperInsertionReleased)
+            {
+                ExtendAllRanges(upper.vesselRanges);
+                if (!upperCutoffCommanded && upper.orbit != null &&
+                    upper.orbit.PeA >= 90000d)
+                {
+                    foreach (Part part in upper.parts)
+                    {
+                        ModuleEngines upperEngine =
+                            part.FindModuleImplementing<ModuleEngines>();
+                        if (upperEngine != null)
+                            upperEngine.Shutdown();
+                    }
+                    upperCutoffCommanded = true;
+                    Debug.Log(string.Format(
+                        "[CZ10BNetRecovery] UPPER_STAGE_CUTOFF apoapsis={0:F0} periapsis={1:F0}",
+                        upper.orbit.ApA, upper.orbit.PeA));
+                }
+                if (upper.orbit != null && upper.orbit.PeA >= 90000d &&
+                    UpperStageThrust(upper) < 1f)
+                {
+                    RestoreDefaultRanges(upper.vesselRanges);
+                    upperInsertionReleased = true;
+                    Debug.Log(string.Format(
+                        "[CZ10BNetRecovery] UPPER_STAGE_INSERTION_COMPLETE apoapsis={0:F0} periapsis={1:F0}",
+                        upper.orbit.ApA, upper.orbit.PeA));
+                }
+            }
+            if (separatedNow && !upperSeparated)
+            {
+                upperSeparated = true;
+                separationPropellantFraction = BoosterPropellantFraction(booster);
+                Debug.Log(string.Format(
+                    "[CZ10BNetRecovery] STAGE_RESERVE fraction={0:F4} altitude={1:F0} speed={2:F1} mass={3:F3}",
+                    separationPropellantFraction, booster.altitude,
+                    booster.srfSpeed, booster.GetTotalMass()));
+            }
 
             ModuleCatchHook hook = booster == null ? null : booster.parts
                 .Select(p => p.FindModuleImplementing<ModuleCatchHook>())
                 .FirstOrDefault(h => h != null);
+            ModuleCatchNet captureNet = FindNet();
             if (released && elapsed > 20f && booster == null)
             {
                 Debug.LogError("[CZ10BNetRecovery] " + Prefix +
@@ -108,16 +158,42 @@ namespace CZ10BNetRecovery
             {
                 if (capturedAt < 0f)
                     capturedAt = elapsed;
-                if (elapsed - capturedAt >= 8f && everPowered && reachedAltitude && upperSeparated)
-                    Report(true, hook);
+                float captureAngularRate = booster == null ? float.MaxValue :
+                    booster.angularVelocity.magnitude * Mathf.Rad2Deg;
+                float captureVerticalSpeed = booster == null ? float.MaxValue :
+                    Mathf.Abs((float)booster.verticalSpeed);
+                float captureHorizontalSpeed = booster == null ? float.MaxValue :
+                    (float)booster.horizontalSrfSpeed;
+                float platformTilt = SeaPlatformTilt(captureNet);
+                bool payoutComplete = captureNet != null &&
+                    captureNet.cableDeflection >= captureNet.captureSettleDrop - 1f;
+                bool captureStable = captureAngularRate <= 12f &&
+                    captureVerticalSpeed <= 4f && captureHorizontalSpeed <= 3f &&
+                    platformTilt <= 3f && payoutComplete;
+                if (captureStable)
+                {
+                    if (stableCapturedAt < 0f)
+                        stableCapturedAt = elapsed;
+                }
+                else
+                    stableCapturedAt = -1f;
+                if (stableCapturedAt >= 0f && elapsed - stableCapturedAt >= 8f &&
+                    everPowered && reachedAltitude && upperSeparated)
+                    Report(separationPropellantFraction >= 0f &&
+                           separationPropellantFraction <= 0.205f, hook);
+                else if (elapsed - capturedAt >= 30f)
+                    Report(false, hook);
             }
             else
+            {
                 capturedAt = -1f;
+                stableCapturedAt = -1f;
+            }
 
             if (elapsed >= nextStatus)
             {
                 nextStatus = elapsed + 5f;
-                ModuleCatchNet net = FindNet();
+                ModuleCatchNet net = captureNet;
                 double targetDistance = booster == null || seaPlatform == null
                     ? -1 : Vector3d.Distance(
                         booster.mainBody.GetWorldSurfacePosition(
@@ -125,12 +201,16 @@ namespace CZ10BNetRecovery
                         seaPlatform.mainBody.GetWorldSurfacePosition(
                             seaPlatform.latitude, seaPlatform.longitude, 0));
                 Debug.Log(string.Format(
-                    "[CZ10BNetRecovery] {0}_STATUS t={1:F1} altitude={2:F0} lat={3:F5} lon={4:F5} horizontal={5:F1} targetDistance={6:F0} powered={7} high={8} separated={9} hook={10} net={11} cableError={12:F2} sag={13:F2} maxHighAngular={14:F2} angular={15:F2}",
+                    "[CZ10BNetRecovery] {0}_STATUS t={1:F1} altitude={2:F0} apoapsis={3:F0} vertical={4:F1} horizontal={5:F1} reserve={6:F4} lat={7:F5} lon={8:F5} targetDistance={9:F0} powered={10} high={11} separated={12} hook={13} net={14} cableError={15:F2} sag={16:F2} maxHighAngular={17:F2} angular={18:F2} platformTilt={19:F2} stableFor={20:F1}",
                     Prefix,
                     elapsed, booster == null ? -1 : booster.altitude,
+                    booster == null || booster.orbit == null ? -1 :
+                        booster.orbit.ApA,
+                    booster == null ? 0 : booster.verticalSpeed,
+                    booster == null ? 0 : booster.horizontalSrfSpeed,
+                    BoosterPropellantFraction(booster),
                     booster == null ? 0 : booster.latitude,
                     booster == null ? 0 : booster.longitude,
-                    booster == null ? 0 : booster.horizontalSrfSpeed,
                     targetDistance, everPowered, reachedAltitude, upperSeparated,
                     hook == null ? "missing" : hook.hookState,
                     net == null ? "missing" : net.netState,
@@ -138,22 +218,38 @@ namespace CZ10BNetRecovery
                     net == null ? -1f : net.cableDeflection,
                     maxHighAngularRate,
                     booster == null ? -1f :
-                        booster.angularVelocity.magnitude * Mathf.Rad2Deg));
+                        booster.angularVelocity.magnitude * Mathf.Rad2Deg,
+                    SeaPlatformTilt(net), stableCapturedAt < 0f ? 0f :
+                        elapsed - stableCapturedAt));
                 if (seaMission && seaPlatform != null)
                 {
                     Debug.Log(string.Format(
-                        "[CZ10BNetRecovery] SEA_PLATFORM_STATUS lat={0:F5} lon={1:F5} alt={2:F1} terrain={3:F1} situation={4} packed={5} released={6}",
+                        "[CZ10BNetRecovery] SEA_PLATFORM_STATUS lat={0:F5} lon={1:F5} alt={2:F1} terrain={3:F1} situation={4} packed={5} released={6} tilt={7:F2}",
                         seaPlatform.latitude, seaPlatform.longitude,
                         seaPlatform.altitude, seaTerrainAltitude,
                         seaPlatform.situation, seaPlatform.packed,
-                        seaPlacementReleased));
+                        seaPlacementReleased, SeaPlatformTilt(net)));
+                }
+                if (upperSeparated && upper != null)
+                {
+                    ModuleEngines upperEngine = upper.parts
+                        .Select(p => p.FindModuleImplementing<ModuleEngines>())
+                        .FirstOrDefault(e => e != null);
+                    Debug.Log(string.Format(
+                        "[CZ10BNetRecovery] UPPER_STAGE_STATUS altitude={0:F0} apoapsis={1:F0} periapsis={2:F0} speed={3:F1} thrust={4:F1} packed={5} situation={6}",
+                        upper.altitude,
+                        upper.orbit == null ? -1 : upper.orbit.ApA,
+                        upper.orbit == null ? -1 : upper.orbit.PeA,
+                        upper.srfSpeed,
+                        upperEngine == null ? -1f : upperEngine.finalThrust,
+                        upper.packed, upper.situation));
                 }
             }
             // Use simulated mission time for the long acceptance deadline. Near
             // two loaded vessels KSP can run well below real time, especially in
             // a hidden/background test; wall-clock timeout would reject a valid
             // trajectory that is still advancing normally in physics time.
-            if (Planetarium.GetUniversalTime() - startUniversalTime >= 600d)
+            if (Planetarium.GetUniversalTime() - startUniversalTime >= 1200d)
                 Report(false, hook);
         }
 
@@ -206,10 +302,13 @@ namespace CZ10BNetRecovery
         private void Report(bool pass, ModuleCatchHook hook)
         {
             reported = true;
+            Vessel booster = FindVesselWithPart("CZ10B-DemoBooster");
+            float landingFraction = BoosterPropellantFraction(booster);
             string detail = string.Format(
-                " powered={0} high={1} separated={2} hook={3} maxHighAngular={4:F2}",
+                " powered={0} high={1} separated={2} hook={3} maxHighAngular={4:F2} separationReserve={5:F4} landingReserve={6:F4}",
                 everPowered, reachedAltitude, upperSeparated,
-                hook == null ? "missing" : hook.hookState, maxHighAngularRate);
+                hook == null ? "missing" : hook.hookState, maxHighAngularRate,
+                separationPropellantFraction, landingFraction);
             if (pass)
                 Debug.Log("[CZ10BNetRecovery] " + Prefix + "_PASS" + detail);
             else
@@ -233,14 +332,17 @@ namespace CZ10BNetRecovery
             ExtendRanges(platform.vesselRanges.orbit);
             seaLatitude = platform.latitude;
             double startLongitude = platform.longitude;
-            // The 45-degree Kerbin-scaled gravity turn puts apogee about 26 km
-            // down-range while the stage still carries ~385 m/s eastward speed.
-            // Place the ship farther ahead so the single boost-back burn only
-            // brakes to the planned eastward arrival velocity; the old 2.50 deg
-            // location required a wasteful 12 km reversal after overshooting it.
-            seaLongitude = startLongitude + 3.50;
+            Quaternion startSurfaceFrame = SurfaceFrame(body, seaLatitude,
+                startLongitude, platform.altitude);
+            seaSurfaceRotationOffset = Quaternion.Inverse(startSurfaceFrame)
+                * platform.transform.rotation;
+            // The fuel-budget ascent now carries useful horizontal velocity all
+            // the way to a much later separation.  Park the ship near the
+            // drag-aware ballistic footprint instead of spending recovery fuel
+            // cancelling that velocity near apogee.
+            seaLongitude = startLongitude + 72.4013;
             seaTerrainAltitude = TerrainAltitude(body, seaLatitude, seaLongitude);
-            for (double offset = 3.50; offset <= 5.00; offset += 0.20)
+            for (double offset = 72.4013; offset <= 75.4013; offset += 0.20)
             {
                 double candidateLongitude = startLongitude + offset;
                 double candidateTerrain = TerrainAltitude(body, seaLatitude,
@@ -252,6 +354,24 @@ namespace CZ10BNetRecovery
                     break;
                 }
             }
+            // A loaded off-rails vessel cannot reliably cross tens of
+            // kilometres in one SetPosition call; KSP's floating-origin and
+            // collision enhancement clamp the move.  Update the packed orbit
+            // from surface coordinates first, then unpack at the destination.
+            Vector3d relativePosition = body.GetRelSurfacePosition(
+                seaLatitude, seaLongitude, 5.5);
+            Vector3d worldPosition = body.position + relativePosition;
+            platform.GoOnRails();
+            platform.orbit.UpdateFromStateVectors(relativePosition,
+                // getRFrmVel expects a world-space point and subtracts the
+                // body's current floating-origin position internally. Passing
+                // the relative point injected roughly Kerbin's 200 m/s surface
+                // speed on some repeated cold starts and caused an immediate
+                // collision-enhancer explosion during unpack.
+                body.getRFrmVel(worldPosition), body,
+                Planetarium.GetUniversalTime());
+            FlightGlobals.SetActiveVessel(platform);
+            platform.SetPosition(worldPosition, true);
             platform.GoOffRails();
             platform.Landed = false;
             platform.Splashed = true;
@@ -284,9 +404,10 @@ namespace CZ10BNetRecovery
             seaPlatform.Landed = false;
             seaPlatform.Splashed = true;
             seaPlatform.situation = Vessel.Situations.SPLASHED;
-            seaPlatform.SetWorldVelocity(Vector3d.zero);
+            SetSurfaceStationaryVelocity(seaPlatform);
             seaPlatform.angularVelocity = Vector3.zero;
             seaPlatform.angularMomentum = Vector3.zero;
+            seaStationAltitude = System.Math.Max(seaPlatform.altitude, 5.5d);
             seaPlacementReleased = true;
             Debug.Log(string.Format(
                 "[CZ10BNetRecovery] SEA_PLATFORM_PHYSICS_RELEASED lat={0:F5} lon={1:F5} alt={2:F1} situation={3}",
@@ -301,24 +422,166 @@ namespace CZ10BNetRecovery
                 FlightGlobals.fetch.SetVesselTarget(seaPlatform, true);
         }
 
+        private void MaintainSeaStation()
+        {
+            if (seaPlatform == null || seaPlatform.state == Vessel.State.DEAD ||
+                seaPlatform.packed)
+                return;
+            CelestialBody body = seaPlatform.mainBody;
+            // Model the recovery ship's DP2 station keeping.  KSP's floating
+            // origin changes while the booster travels hundreds of kilometres,
+            // so a one-shot inertial velocity cannot preserve a remote loaded
+            // vessel's longitude. DP station keeping pins position and deck
+            // attitude every frame; the capture winches no longer apply their
+            // reaction force to this vessel.
+            seaPlatform.SetPosition(body.GetWorldSurfacePosition(
+                seaLatitude, seaLongitude, seaStationAltitude), true);
+            seaPlatform.SetRotation(SurfaceFrame(body, seaLatitude,
+                seaLongitude, seaStationAltitude) * seaSurfaceRotationOffset);
+            SetSurfaceStationaryVelocity(seaPlatform);
+            seaPlatform.angularVelocity = Vector3.zero;
+            seaPlatform.angularMomentum = Vector3.zero;
+        }
+
+        private void ManageSeaStationLoading(Vessel booster)
+        {
+            if (seaPlatform == null || seaPlatform.state == Vessel.State.DEAD ||
+                booster == null)
+                return;
+            double distance = Vector3d.Distance(
+                booster.mainBody.GetWorldSurfacePosition(
+                    booster.latitude, booster.longitude, 0),
+                seaPlatform.mainBody.GetWorldSurfacePosition(
+                    seaLatitude, seaLongitude, 0));
+            const double activationDistance = 120000d;
+            if (distance > activationDistance)
+            {
+                if (!seaStationDeferred)
+                {
+                    seaPlatform.Landed = false;
+                    seaPlatform.Splashed = true;
+                    seaPlatform.situation = Vessel.Situations.SPLASHED;
+                    RestoreDefaultRanges(seaPlatform.vesselRanges);
+                    seaPlatform.GoOnRails();
+                    seaStationDeferred = true;
+                    Debug.Log(string.Format(
+                        "[CZ10BNetRecovery] SEA_PLATFORM_DEFERRED distance={0:F0}",
+                        distance));
+                }
+                return;
+            }
+
+            if (seaStationDeferred)
+            {
+                ExtendAllRanges(seaPlatform.vesselRanges);
+                seaPlatform.GoOffRails();
+                seaPlatform.Landed = false;
+                seaPlatform.Splashed = true;
+                seaPlatform.situation = Vessel.Situations.SPLASHED;
+                PlaceSeaPlatform();
+                RebindSeaTarget();
+                seaStationDeferred = false;
+                Debug.Log(string.Format(
+                    "[CZ10BNetRecovery] SEA_PLATFORM_REACTIVATED distance={0:F0}",
+                    distance));
+            }
+            MaintainSeaStation();
+        }
+
         private void PlaceSeaPlatform()
         {
             CelestialBody body = seaPlatform.mainBody;
             Vector3d position = body.GetWorldSurfacePosition(seaLatitude,
                 seaLongitude, 5.5);
             seaPlatform.SetPosition(position, true);
-            seaPlatform.SetWorldVelocity(Vector3d.zero);
+            // DP station keeping also holds deck attitude. Merely clearing
+            // angular momentum allowed buoyancy to leave the tall platform on
+            // its side, rotating the net's local capture plane with it.
+            seaPlatform.SetRotation(SurfaceFrame(body, seaLatitude,
+                seaLongitude, 5.5) * seaSurfaceRotationOffset);
+            SetSurfaceStationaryVelocity(seaPlatform);
             seaPlatform.angularVelocity = Vector3.zero;
             seaPlatform.angularMomentum = Vector3.zero;
         }
 
+        private static Quaternion SurfaceFrame(CelestialBody body,
+            double latitude, double longitude, double altitude)
+        {
+            Vector3d origin = body.GetWorldSurfacePosition(latitude, longitude,
+                altitude);
+            Vector3d northPoint = body.GetWorldSurfacePosition(
+                System.Math.Min(latitude + 0.01, 89.99), longitude, altitude);
+            Vector3 up = (origin - body.position).normalized;
+            Vector3 north = Vector3.ProjectOnPlane(
+                (northPoint - origin).normalized, up).normalized;
+            return Quaternion.LookRotation(north, up);
+        }
+
+        private static void SetSurfaceStationaryVelocity(Vessel platform)
+        {
+            CelestialBody body = platform.mainBody;
+            // Zero inertial velocity makes the rotating planet slide under the
+            // ship.  A fixed latitude/longitude requires the local rotating-
+            // frame velocity. CelestialBody.getRFrmVel explicitly subtracts
+            // body.position internally, so its argument must be world-space.
+            platform.SetWorldVelocity(body.getRFrmVel(platform.GetWorldPos3D()));
+        }
+
+        private float SeaPlatformTilt(ModuleCatchNet net)
+        {
+            if (seaPlatform == null || net == null || net.part == null)
+                return -1f;
+            Vector3 surfaceUp = (seaPlatform.GetWorldPos3D() -
+                seaPlatform.mainBody.position).normalized;
+            return Vector3.Angle(net.part.transform.up, surfaceUp);
+        }
+
         private static void ExtendRanges(VesselRanges.Situation ranges)
         {
-            const float keepLoadedDistance = 100000f;
+            // The 15-degree, 20%-reserve ascent puts the drag-aware footprint
+            // about 72 degrees (roughly 754 km) downrange.  The upper stage must
+            // also stay loaded after separation so it can keep accelerating.
+            const float keepLoadedDistance = 850000f;
             ranges.load = keepLoadedDistance;
             ranges.unload = keepLoadedDistance;
             ranges.pack = keepLoadedDistance;
             ranges.unpack = keepLoadedDistance;
+        }
+
+        private static void ExtendAllRanges(VesselRanges ranges)
+        {
+            if (ranges == null)
+                return;
+            ExtendRanges(ranges.prelaunch);
+            ExtendRanges(ranges.landed);
+            ExtendRanges(ranges.splashed);
+            ExtendRanges(ranges.flying);
+            ExtendRanges(ranges.subOrbital);
+            ExtendRanges(ranges.orbit);
+            ExtendRanges(ranges.escaping);
+        }
+
+        private static void RestoreDefaultRanges(VesselRanges ranges)
+        {
+            if (ranges == null)
+                return;
+            VesselRanges defaults = new VesselRanges();
+            ranges.prelaunch = new VesselRanges.Situation(defaults.prelaunch);
+            ranges.landed = new VesselRanges.Situation(defaults.landed);
+            ranges.splashed = new VesselRanges.Situation(defaults.splashed);
+            ranges.flying = new VesselRanges.Situation(defaults.flying);
+            ranges.subOrbital = new VesselRanges.Situation(defaults.subOrbital);
+            ranges.orbit = new VesselRanges.Situation(defaults.orbit);
+            ranges.escaping = new VesselRanges.Situation(defaults.escaping);
+        }
+
+        private static float UpperStageThrust(Vessel upper)
+        {
+            if (upper == null || upper.parts == null)
+                return 0f;
+            return upper.parts.Select(p =>
+                p.FindModuleImplementing<ModuleEngines>())
+                .Where(e => e != null).Sum(e => e.finalThrust);
         }
 
         private static double TerrainAltitude(CelestialBody body, double latitude,
@@ -347,6 +610,27 @@ namespace CZ10BNetRecovery
                 .SelectMany(v => v.parts)
                 .Select(p => p.FindModuleImplementing<ModuleCatchNet>())
                 .FirstOrDefault(n => n != null);
+        }
+
+        private static float BoosterPropellantFraction(Vessel vessel)
+        {
+            if (vessel == null || vessel.parts == null)
+                return -1f;
+            Part booster = vessel.parts.FirstOrDefault(p => p != null &&
+                p.partInfo != null && p.partInfo.name == "CZ10B-DemoBooster");
+            if (booster == null || booster.Resources == null)
+                return -1f;
+            double amount = 0d;
+            double capacity = 0d;
+            foreach (PartResource resource in booster.Resources)
+            {
+                if (resource.resourceName != "LiquidFuel" &&
+                    resource.resourceName != "Oxidizer")
+                    continue;
+                amount += resource.amount;
+                capacity += resource.maxAmount;
+            }
+            return capacity > 0d ? (float)(amount / capacity) : -1f;
         }
 
         private static void DisablePartColliders(Part part)

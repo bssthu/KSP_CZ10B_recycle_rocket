@@ -1,0 +1,38 @@
+@LAZYGLOBAL OFF.
+
+// Autonomous upper-stage insertion.  The first burn establishes the 100 km
+// apoapsis; a short prograde burn around apoapsis then raises periapsis above
+// the atmosphere without interfering with the booster's recovery computer.
+LOCAL TARGET_APOAPSIS IS 100000.
+LOCAL TARGET_PERIAPSIS IS 95000.
+
+SAS OFF.
+RCS ON.
+FOR ENGINE IN SHIP:ENGINES {
+    ENGINE:ACTIVATE.
+}
+LOCK STEERING TO PROGRADE.
+LOCK THROTTLE TO 1.
+WAIT UNTIL SHIP:APOAPSIS >= TARGET_APOAPSIS.
+LOCK THROTTLE TO 0.
+
+// At this scale the Poodle-class stage needs only a few seconds near apoapsis.
+WAIT UNTIL ETA:APOAPSIS <= 8 OR SHIP:VERTICALSPEED < 0.
+LOCK STEERING TO PROGRADE.
+LOCK THROTTLE TO 0.20.
+LOCAL CIRCULAR_SPEED IS SQRT(SHIP:BODY:MU
+    / (SHIP:BODY:RADIUS + SHIP:ALTITUDE)).
+UNTIL SHIP:PERIAPSIS >= TARGET_PERIAPSIS
+      OR SHIP:VELOCITY:ORBIT:MAG >= CIRCULAR_SPEED * 0.998
+      OR SHIP:APOAPSIS >= 110000 {
+    SET CIRCULAR_SPEED TO SQRT(SHIP:BODY:MU
+        / (SHIP:BODY:RADIUS + SHIP:ALTITUDE)).
+    IF SHIP:APOAPSIS > 110000 {
+        LOCK THROTTLE TO 0.20.
+    }
+    WAIT 0.02.
+}
+LOCK THROTTLE TO 0.
+PRINT "UPPER STAGE ORBIT ACHIEVED".
+PRINT "AP " + ROUND(SHIP:APOAPSIS / 1000,1) + " km".
+PRINT "PE " + ROUND(SHIP:PERIAPSIS / 1000,1) + " km".
