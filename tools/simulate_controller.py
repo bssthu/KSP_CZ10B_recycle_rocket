@@ -1,6 +1,6 @@
 """Deterministic point-mass regression for constrained terminal guidance.
 
-This mirrors the rolling cubic reference, acceleration/tilt constraints,
+This mirrors the fixed height-indexed Hermite reference, acceleration/tilt constraints,
 near-field PID handover and continuously tracking cable wait in ``main.ks``. It is not a
 high-fidelity KSP atmosphere or propulsion simulation.
 """
@@ -18,19 +18,15 @@ CAPTURE_SPEED = 0.65
 NET_MAX_VERTICAL = 7.5
 NET_MAX_LATERAL = 4.0
 NET_HALF_WIDTH = 12.0
-TGO_MIN = 4.0
-TGO_MAX = 90.0
-ARRIVAL_TIME_SAFETY = 1.12
-REPLAN_PERIOD = 0.50
-REPLAN_VERTICAL_SCALE = 0.82
 LOW_FUEL_FRACTION = 0.0025
-LOW_FUEL_TGO_SCALE = 0.78
+LOW_FUEL_DESCENT_SCALE = 1.28
 LOW_FUEL_CAPTURE_SPEED = 1.0
 RECOVERY_START_FRACTION = 0.20
 DESCENT_SPEED_PER_METER = 0.100
 DESCENT_MAX_SPEED = 700.0
-TERMINAL_HORIZONTAL_TGO_SCALE = 0.75
-TERMINAL_HORIZONTAL_TGO_MIN = 6.0
+PLAN_POSITION_GAIN = 0.035
+PLAN_VELOCITY_GAIN = 0.65
+PLAN_STOP_ACCEL = 3.0
 MAX_HORIZONTAL_ACCEL = 55.0
 PID_SWITCH_HEIGHT = 18.0
 HORIZONTAL_CORRIDOR_HEIGHT = 1000.0
@@ -39,13 +35,14 @@ CENTERING_HOLD_HEIGHT = 16.0
 CENTERING_HOLD_ERROR = 7.0
 WIRE_HOLD_HEIGHT = 12.0
 WIRE_HOLD_HORIZONTAL_RANGE = 20.0
-WIRE_HOLD_MAX_SECONDS = 12.0
+WIRE_HOLD_MAX_SECONDS = 2.5
 POST_WIRE_CROSSING_SPEED = 1.5
-CABLE_TRIGGER_HEIGHT = 30.0
-CABLE_TRIGGER_HALF_WIDTH = 10.0
+CABLE_TRIGGER_HEIGHT = 100.0
+CABLE_TRIGGER_HALF_WIDTH = 12.0
 CABLE_CLOSE_SECONDS = (8.0 - 2.15) / 15.0
 CABLE_TRACKING_SPEED = 10.0
-CABLE_SETTLE_ERROR = 0.5
+CABLE_SETTLE_ERROR = 0.75
+CABLE_DETECTION_DEPTH = 6.0
 CLOSED_CABLE_INSET = 2.15
 TERMINAL_ACCEL_FILTER = 0.10
 FINAL_HORIZONTAL_SPEED = 0.5
@@ -55,16 +52,28 @@ HORIZONTAL_DEADBAND = 3.0
 HORIZONTAL_VELOCITY_GAIN = 1.0
 HORIZONTAL_ALIGN_RANGE = 300.0
 HORIZONTAL_ALIGN_SPEED = 12.0
-HORIZONTAL_ALIGN_POSITION_GAIN = 0.07
-HORIZONTAL_ALIGN_VELOCITY_GAIN = 0.35
+HORIZONTAL_ALIGN_POSITION_GAIN = 0.10
+HORIZONTAL_ALIGN_VELOCITY_GAIN = 0.65
+FINAL_ALIGN_HEIGHT = 45.0
+FINAL_ALIGN_RANGE = 100.0
+FINAL_ALIGN_HOLD_SECONDS = 12.0
+FINAL_ALIGN_SPEED = 3.0
+FINAL_ALIGN_POSITION_GAIN = 0.05
+FINAL_ALIGN_VELOCITY_GAIN = 0.40
+FINAL_ALIGN_READY_ERROR = 6.0
+FINAL_ALIGN_READY_SPEED = 0.75
+FINAL_ALIGN_READY_TILT = math.radians(1.0)
+FINAL_CAPTURE_VELOCITY_GAIN = 0.40
+FINAL_CAPTURE_MAX_ACCEL = 1.0
 ENTRY_MAX_TILT = 55.0
 LANDING_MAX_TILT = 12.0
-DRAG_FACTOR = 2.5e-5
+VERTICAL_DRAG_FACTOR = 2.5e-5
+HORIZONTAL_DRAG_FACTOR = 1.5e-4
 ATMOSPHERE_SCALE_HEIGHT = 5000.0
-MIDCOURSE_START_HEIGHT = 15000.0
-TERMINAL_GUIDANCE_START_HEIGHT = 15000.0
+MIDCOURSE_START_HEIGHT = 30000.0
+TERMINAL_GUIDANCE_START_HEIGHT = 30000.0
 MIDCOURSE_END_MARGIN = 600.0
-MIDCOURSE_PREDICTED_ERROR = 50.0
+MIDCOURSE_PREDICTED_ERROR = 999999999.0
 MIDCOURSE_MAX_HORIZONTAL_ACCEL = 8.0
 
 
@@ -114,6 +123,9 @@ def run(case: Case) -> Result:
     integral = 0.0
     was_pid_mode = False
     capture_align_mode = False
+    final_align_mode = False
+    final_align_started_at = None
+    final_descent_armed = False
     wire_hold_started_at = None
     cable_close_elapsed = 0.0
     net_closed = False
@@ -131,18 +143,9 @@ def run(case: Case) -> Result:
     entered_center = False
     rebound_after_center = 0.0
     powered = False
-    arrival_safety = ARRIVAL_TIME_SAFETY if -vv > 800.0 else 1.0
-    plan_vertical_tgo = (
-        2.0 * max(h, 1.0) / max(-vv + CAPTURE_SPEED, 1.0)
-        * arrival_safety
-    )
-    plan_arrival = clamp(
-        plan_vertical_tgo * REPLAN_VERTICAL_SCALE,
-        TGO_MIN,
-        TGO_MAX,
-    )
-    live_vertical_tgo = plan_arrival
-    next_replan = REPLAN_PERIOD
+    plan_height = 0.0
+    plan_x = plan_z = 0.0
+    plan_error_slope_x = plan_error_slope_z = 0.0
 
     for step in range(int(480 / DT)):
         now = step * DT
@@ -151,10 +154,10 @@ def run(case: Case) -> Result:
         sensed_h, sensed_vv, sensed_x, sensed_z, sensed_vx, sensed_vz = history[-1 - delay_steps]
 
         density = math.exp(-max(h, 0.0) / ATMOSPHERE_SCALE_HEIGHT)
-        vertical_drag = -DRAG_FACTOR * density * vv * abs(vv)
+        vertical_drag = -VERTICAL_DRAG_FACTOR * density * vv * abs(vv)
         horizontal_speed = math.hypot(vx, vz)
-        drag_ax = -DRAG_FACTOR * density * vx * horizontal_speed
-        drag_az = -DRAG_FACTOR * density * vz * horizontal_speed
+        drag_ax = -HORIZONTAL_DRAG_FACTOR * density * vx * horizontal_speed
+        drag_az = -HORIZONTAL_DRAG_FACTOR * density * vz * horizontal_speed
 
         if not powered:
             available_net_decel = max(
@@ -163,28 +166,14 @@ def run(case: Case) -> Result:
             stop_distance = max(sensed_vv**2 - CAPTURE_SPEED**2, 0.0) / (
                 2.0 * available_net_decel
             ) * 1.50
-            if sensed_vv < 0 and (
-                sensed_h <= TERMINAL_GUIDANCE_START_HEIGHT
-                or sensed_h <= stop_distance + 250.0
-            ):
+            if sensed_vv < 0 and sensed_h <= stop_distance + 250.0:
                 powered = True
                 ignition_height = sensed_h
-                arrival_safety = (
-                    ARRIVAL_TIME_SAFETY if -sensed_vv > 800.0 else 1.0
-                )
-                plan_vertical_tgo = (
-                    2.0 * max(sensed_h, 1.0) / max(
-                        -sensed_vv + CAPTURE_SPEED, 1.0
-                    ) * arrival_safety
-                )
-                plan_tgo = clamp(
-                    plan_vertical_tgo * REPLAN_VERTICAL_SCALE,
-                    TGO_MIN,
-                    TGO_MAX,
-                )
-                plan_arrival = now + plan_tgo
-                live_vertical_tgo = plan_tgo
-                next_replan = now + REPLAN_PERIOD
+                plan_height = max(sensed_h, 1.0)
+                plan_x, plan_z = sensed_x, sensed_z
+                progress_rate0 = max(-sensed_vv, CAPTURE_SPEED) / plan_height
+                plan_error_slope_x = -sensed_vx / max(progress_rate0, 0.0001)
+                plan_error_slope_z = -sensed_vz / max(progress_rate0, 0.0001)
             else:
                 effective_g = max(G - max(vertical_drag, 0.0), 1.0)
                 ballistic_tgo = (
@@ -216,7 +205,7 @@ def run(case: Case) -> Result:
                         (desired_vz - sensed_vz) * 0.30,
                         MIDCOURSE_MAX_HORIZONTAL_ACCEL,
                     )
-                    vertical_thrust = G * 0.30
+                    vertical_thrust = 0.0
                     full_throttle_seconds += (
                         math.sqrt(vertical_thrust**2 + target_ax**2 + target_az**2)
                         / max(case.available_accel, 0.001)
@@ -250,6 +239,14 @@ def run(case: Case) -> Result:
         )
         if horizontal_corridor_mode and error <= HORIZONTAL_ALIGN_RANGE:
             capture_align_mode = True
+        if (
+            not final_align_mode
+            and sensed_h <= FINAL_ALIGN_HEIGHT
+            and error <= FINAL_ALIGN_RANGE
+        ):
+            final_align_mode = True
+            final_align_started_at = now
+            integral = 0.0
         if pid_mode and not was_pid_mode:
             integral = 0.0
         was_pid_mode = pid_mode
@@ -268,31 +265,9 @@ def run(case: Case) -> Result:
         wire_required = (
             wire_geometry_required
             and now - wire_hold_started_at < WIRE_HOLD_MAX_SECONDS
+            and not final_align_mode
         )
 
-        if not pid_mode and now >= next_replan:
-            arrival_safety = ARRIVAL_TIME_SAFETY if -sensed_vv > 800.0 else 1.0
-            plan_vertical_tgo = (
-                2.0 * max(sensed_h, 1.0)
-                / max(-sensed_vv + CAPTURE_SPEED, 1.0)
-                * arrival_safety
-            )
-            plan_tgo = clamp(
-                plan_vertical_tgo * REPLAN_VERTICAL_SCALE,
-                TGO_MIN,
-                TGO_MAX,
-            )
-            # Match the flight script's absolute tank-fraction threshold using
-            # the point model's full-throttle-equivalent consumption budget.
-            estimated_fraction = RECOVERY_START_FRACTION * max(
-                0.0, 1.0 - full_throttle_seconds / 31.0
-            )
-            if estimated_fraction < LOW_FUEL_FRACTION:
-                plan_tgo = max(TGO_MIN, plan_tgo * LOW_FUEL_TGO_SCALE)
-            live_vertical_tgo = plan_tgo
-            next_replan = now + REPLAN_PERIOD
-
-        tgo = max(live_vertical_tgo, 1.5)
         corridor_down_speed = max(
             CAPTURE_SPEED,
             min(DESCENT_MAX_SPEED, max(sensed_h, 0.0) * DESCENT_SPEED_PER_METER),
@@ -301,10 +276,10 @@ def run(case: Case) -> Result:
             0.0, 1.0 - full_throttle_seconds / 31.0
         )
         if estimated_fraction < LOW_FUEL_FRACTION:
-            corridor_down_speed /= LOW_FUEL_TGO_SCALE
+            corridor_down_speed *= LOW_FUEL_DESCENT_SCALE
         target_vertical_speed = -corridor_down_speed
         vertical_net_accel = 2.0 * (target_vertical_speed - sensed_vv)
-        if sensed_vv < 0:
+        if sensed_vv < target_vertical_speed:
             brake_safety_blend = clamp(
                 sensed_h / TERMINAL_GUIDANCE_START_HEIGHT, 0.0, 1.0
             )
@@ -314,28 +289,54 @@ def run(case: Case) -> Result:
             )
             vertical_net_accel = max(vertical_net_accel, safe_braking_accel)
         vertical_thrust_command = G + vertical_net_accel
-        horizontal_guidance_tgo = max(
-            live_vertical_tgo * TERMINAL_HORIZONTAL_TGO_SCALE,
-            TERMINAL_HORIZONTAL_TGO_MIN,
+        progress = clamp(1.0 - sensed_h / max(plan_height, 1.0), 0.0, 1.0)
+        progress2 = progress**2
+        progress3 = progress**3
+        h00 = 2.0 * progress3 - 3.0 * progress2 + 1.0
+        h10 = progress3 - 2.0 * progress2 + progress
+        reference_x = plan_x * h00 + plan_error_slope_x * h10
+        reference_z = plan_z * h00 + plan_error_slope_z * h10
+        d_error_ds_x = (
+            plan_x * (6.0 * progress2 - 6.0 * progress)
+            + plan_error_slope_x * (3.0 * progress2 - 4.0 * progress + 1.0)
+        )
+        d_error_ds_z = (
+            plan_z * (6.0 * progress2 - 6.0 * progress)
+            + plan_error_slope_z * (3.0 * progress2 - 4.0 * progress + 1.0)
+        )
+        d2_error_ds2_x = (
+            plan_x * (12.0 * progress - 6.0)
+            + plan_error_slope_x * (6.0 * progress - 4.0)
+        )
+        d2_error_ds2_z = (
+            plan_z * (12.0 * progress - 6.0)
+            + plan_error_slope_z * (6.0 * progress - 4.0)
+        )
+        progress_rate = max(-sensed_vv, CAPTURE_SPEED) / max(plan_height, 1.0)
+        reference_vx = -d_error_ds_x * progress_rate
+        reference_vz = -d_error_ds_z * progress_rate
+        plan_stop_speed = math.sqrt(
+            2.0 * PLAN_STOP_ACCEL * max(error - HORIZONTAL_DEADBAND, 0.0)
+        )
+        reference_vx, reference_vz = clamp_vector(
+            reference_vx, reference_vz, plan_stop_speed
         )
         ax = (
-            6.0 * sensed_x / horizontal_guidance_tgo**2
-            - 4.0 * sensed_vx / horizontal_guidance_tgo
+            -d2_error_ds2_x * progress_rate**2
+            + (sensed_x - reference_x) * PLAN_POSITION_GAIN
+            + (reference_vx - sensed_vx) * PLAN_VELOCITY_GAIN
         )
         az = (
-            6.0 * sensed_z / horizontal_guidance_tgo**2
-            - 4.0 * sensed_vz / horizontal_guidance_tgo
+            -d2_error_ds2_z * progress_rate**2
+            + (sensed_z - reference_z) * PLAN_POSITION_GAIN
+            + (reference_vz - sensed_vz) * PLAN_VELOCITY_GAIN
         )
         ax, az = clamp_vector(ax, az, MAX_HORIZONTAL_ACCEL)
 
         if horizontal_corridor_mode:
             stop_range = max(error - HORIZONTAL_DEADBAND, 0.0)
             stop_speed = math.sqrt(2.0 * HORIZONTAL_STOP_ACCEL * stop_range)
-            height_speed = max(
-                FINAL_HORIZONTAL_SPEED,
-                min(HORIZONTAL_CORRIDOR_SPEED, max(sensed_h, 0.0) * 0.12),
-            )
-            pid_horizontal_speed = min(stop_speed, height_speed)
+            pid_horizontal_speed = min(stop_speed, HORIZONTAL_CORRIDOR_SPEED)
             if capture_align_mode:
                 pid_horizontal_speed = min(
                     HORIZONTAL_ALIGN_SPEED,
@@ -355,6 +356,34 @@ def run(case: Case) -> Result:
                 MAX_HORIZONTAL_ACCEL,
             )
 
+        if final_align_mode and not final_descent_armed:
+            final_stop_range = error
+            final_horizontal_speed = min(
+                FINAL_ALIGN_SPEED,
+                final_stop_range * FINAL_ALIGN_POSITION_GAIN,
+            )
+            if error > 0.25:
+                desired_vx = sensed_x / error * final_horizontal_speed
+                desired_vz = sensed_z / error * final_horizontal_speed
+            else:
+                desired_vx, desired_vz = 0.0, 0.0
+            ax, az = clamp_vector(
+                (desired_vx - sensed_vx) * FINAL_ALIGN_VELOCITY_GAIN,
+                (desired_vz - sensed_vz) * FINAL_ALIGN_VELOCITY_GAIN,
+                MAX_HORIZONTAL_ACCEL,
+            )
+
+        estimated_tilt = math.atan2(math.hypot(actual_ax, actual_az), G)
+        if (
+            final_align_mode
+            and not final_descent_armed
+            and error <= FINAL_ALIGN_READY_ERROR
+            and math.hypot(sensed_vx, sensed_vz) <= FINAL_ALIGN_READY_SPEED
+            and estimated_tilt <= FINAL_ALIGN_READY_TILT
+        ):
+            final_descent_armed = True
+            filtered_ax = filtered_az = 0.0
+
         if pid_mode:
             pid_target_v = -max(
                 CAPTURE_SPEED, min(8.0, max(sensed_h, 0.0) * 0.04)
@@ -372,6 +401,27 @@ def run(case: Case) -> Result:
                 G
                 + 2.00 * (pid_target_v - sensed_vv)
                 + 0.020 * integral
+            )
+
+        if final_align_mode and not final_descent_armed:
+            final_target_v = 0.0
+            assert final_align_started_at is not None
+            if now - final_align_started_at >= FINAL_ALIGN_HOLD_SECONDS:
+                final_target_v = -POST_WIRE_CROSSING_SPEED
+            integral = clamp(
+                integral + (final_target_v - sensed_vv) * DT, -10.0, 10.0
+            )
+            vertical_thrust_command = (
+                G
+                + 2.00 * (final_target_v - sensed_vv)
+                + 0.020 * integral
+            )
+
+        if final_descent_armed:
+            ax, az = clamp_vector(
+                -sensed_vx * FINAL_CAPTURE_VELOCITY_GAIN,
+                -sensed_vz * FINAL_CAPTURE_VELOCITY_GAIN,
+                FINAL_CAPTURE_MAX_ACCEL,
             )
 
         filtered_ax = (
@@ -458,12 +508,13 @@ def run(case: Case) -> Result:
                 and lateral_error <= NET_HALF_WIDTH
                 and net_closed
             )
-            return Result(
-                captured, now, vv, lateral_speed, lateral_error, minimum_height,
-                hover_time, math.hypot(cable_x - x, cable_z - z),
-                ignition_height, full_throttle_seconds,
-                rebound_after_center,
-            )
+            if captured or h <= -CABLE_DETECTION_DEPTH:
+                return Result(
+                    captured, now, vv, lateral_speed, lateral_error, minimum_height,
+                    hover_time, math.hypot(cable_x - x, cable_z - z),
+                    ignition_height, full_throttle_seconds,
+                    rebound_after_center,
+                )
 
     return Result(
         False, 480.0, vv, math.hypot(vx, vz), math.hypot(x, z),
@@ -527,21 +578,26 @@ def cases(seed: int = 20260710, count: int = 250) -> list[Case]:
             available_accel=rng.uniform(45, 65),
             sensor_delay=rng.uniform(0, 0.08),
         ))
-    # High-energy cases are centred on the measured 0.7 trajectory entry:
-    # about 26 km, -1.3 km/s vertical and 1.0 km/s horizontal.  These catch
-    # limits that look adequate for the old 10 km / 140 m/s regression but are
-    # physically incapable of arresting the new fuel-budget ascent.
+    # High-energy cases are centred on the measured 0.8 trajectory entry after
+    # the 40 km retrograde burn: about 30 km, -0.46 km/s vertical, 1.0 km/s
+    # horizontal and a ship placed 30--45 km ahead near the natural footprint.
     for _ in range(count - low_count - medium_count):
         angle = rng.uniform(-math.pi, math.pi)
         direction_x = math.cos(angle)
         direction_z = math.sin(angle)
-        distance = rng.uniform(14000, 18000)
-        cross_offset = rng.uniform(-700, 700)
-        along_speed = rng.uniform(900, 1050)
-        cross_speed = rng.uniform(-30, 30)
+        height = rng.uniform(28500, 30000)
+        vertical_speed = rng.uniform(-550, -400)
+        along_speed = rng.uniform(950, 1050)
+        cross_speed = rng.uniform(-35, 35)
+        ballistic_tgo = (
+            vertical_speed
+            + math.sqrt(vertical_speed**2 + 2.0 * G * height)
+        ) / G
+        distance = along_speed * ballistic_tgo * 0.91 + rng.uniform(-1500, 1500)
+        cross_offset = rng.uniform(-500, 500)
         result.append(Case(
-            height=rng.uniform(24000, 29000),
-            vertical_speed=rng.uniform(-1350, -1200),
+            height=height,
+            vertical_speed=vertical_speed,
             x=distance * direction_x - cross_offset * direction_z,
             z=distance * direction_z + cross_offset * direction_x,
             vx=along_speed * direction_x - cross_speed * direction_z,

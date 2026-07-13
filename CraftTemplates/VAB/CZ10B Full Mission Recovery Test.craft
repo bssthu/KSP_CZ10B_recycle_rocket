@@ -176,9 +176,9 @@ PART
 	part = launchClamp1_2026071507
 	partName = Part
 	persistentId = 2026071507
-	pos = -2.95,2.94,0
+	pos = -2.1,2.94,0
 	attPos = 0,0,0
-	attPos0 = -2.95,2.94,0
+	attPos0 = -2.1,2.94,0
 	rot = 0,0.7071068,0,0.7071068
 	attRot = 0,0,0,1
 	attRot0 = 0,0.7071068,0,0.7071068
@@ -208,9 +208,9 @@ PART
 	part = launchClamp1_2026071508
 	partName = Part
 	persistentId = 2026071508
-	pos = 2.95,2.94,0
+	pos = 2.1,2.94,0
 	attPos = 0,0,0
-	attPos0 = 2.95,2.94,0
+	attPos0 = 2.1,2.94,0
 	rot = 0,0.7071068,0,-0.7071068
 	attRot = 0,0,0,1
 	attRot0 = 0,0.7071068,0,-0.7071068

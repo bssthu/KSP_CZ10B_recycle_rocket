@@ -69,6 +69,13 @@ namespace CZ10BNetRecovery
 
         private readonly Dictionary<ConfigurableJoint, CaptureTether> captureTethers =
             new Dictionary<ConfigurableJoint, CaptureTether>();
+        private sealed class IgnoredCollision
+        {
+            public Collider stage;
+            public Collider platform;
+        }
+        private readonly List<IgnoredCollision> ignoredCaptureCollisions =
+            new List<IgnoredCollision>();
         private readonly List<LineRenderer> cableRenderers = new List<LineRenderer>();
         private double lastScan;
         private double lastTetherUpdate;
@@ -91,6 +98,7 @@ namespace CZ10BNetRecovery
             captures.Clear();
             capturedStages.Clear();
             DestroyCaptureTethers();
+            RestoreCaptureCollisions();
             currentCableInset = openCableInset;
             currentCableCentre = Vector2.zero;
             cableTrackingError = 0f;
@@ -123,6 +131,7 @@ namespace CZ10BNetRecovery
         public void OnDestroy()
         {
             DestroyCaptureTethers();
+            RestoreCaptureCollisions();
             DestroyCableVisuals();
         }
 
@@ -133,6 +142,11 @@ namespace CZ10BNetRecovery
             double universalTime = Planetarium.GetUniversalTime();
             float tetherDeltaTime = UpdateCaptureSettling(universalTime);
             DampCapturedStages(tetherDeltaTime);
+            // Captured cable geometry follows the physical winches every
+            // physics frame. Waiting for the slower target scan caused the
+            // visible lines to pause and then jump to the descending stage.
+            if (captureTethers.Count > 0)
+                UpdateCableVisuals();
             if (debugLogging && universalTime - lastDebug >= 0.5)
             {
                 lastDebug = universalTime;
@@ -321,8 +335,11 @@ namespace CZ10BNetRecovery
                     joint.yDrive = drive;
                     joint.zDrive = drive;
                     joint.targetPosition = Vector3.zero;
-                    joint.breakForce = maximumForce * 1.5f;
-                    joint.breakTorque = maximumForce;
+                    // Release is an explicit operator action. A transient
+                    // collision/solver spike must not silently break one line,
+                    // leave stale Captured state and catapult the stage.
+                    joint.breakForce = Mathf.Infinity;
+                    joint.breakTorque = Mathf.Infinity;
                     joint.enableCollision = false;
 
                     joints.Add(joint);
@@ -343,7 +360,9 @@ namespace CZ10BNetRecovery
 
             captures[candidate.id] = joints;
             capturedStages[candidate.id] = candidate;
+            IgnorePlatformCollisions(candidate);
             netState = "Captured: " + candidate.vesselName;
+            UpdateCableVisuals();
             ScreenMessages.PostScreenMessage(
                 string.Format("NET CAPTURE: {0} ({1} hooks)", candidate.vesselName, joints.Count),
                 8f, ScreenMessageStyle.UPPER_CENTER);
@@ -366,6 +385,15 @@ namespace CZ10BNetRecovery
                 captures[vesselId].RemoveAll(j => j == null);
                 if (captures[vesselId].Count == 0)
                 {
+                    Vessel releasedStage;
+                    if (capturedStages.TryGetValue(vesselId, out releasedStage) &&
+                        releasedStage != null && releasedStage.parts != null)
+                    {
+                        foreach (ModuleCatchHook hook in releasedStage.parts
+                            .Select(p => p.FindModuleImplementing<ModuleCatchHook>())
+                            .Where(h => h != null))
+                            hook.SetCaptured(false);
+                    }
                     captures.Remove(vesselId);
                     capturedStages.Remove(vesselId);
                 }
@@ -463,6 +491,43 @@ namespace CZ10BNetRecovery
                     UnityEngine.Object.Destroy(tether.winchBody.gameObject);
             }
             captureTethers.Clear();
+        }
+
+        private void IgnorePlatformCollisions(Vessel stage)
+        {
+            if (stage == null || stage.parts == null || vessel == null ||
+                vessel.parts == null)
+                return;
+            IEnumerable<Collider> stageColliders = stage.parts
+                .Where(p => p != null)
+                .SelectMany(p => p.GetComponentsInChildren<Collider>())
+                .Where(c => c != null);
+            List<Collider> platformColliders = vessel.parts
+                .Where(p => p != null)
+                .SelectMany(p => p.GetComponentsInChildren<Collider>())
+                .Where(c => c != null).ToList();
+            foreach (Collider stageCollider in stageColliders)
+            {
+                foreach (Collider platformCollider in platformColliders)
+                {
+                    Physics.IgnoreCollision(stageCollider, platformCollider, true);
+                    ignoredCaptureCollisions.Add(new IgnoredCollision
+                    {
+                        stage = stageCollider,
+                        platform = platformCollider
+                    });
+                }
+            }
+        }
+
+        private void RestoreCaptureCollisions()
+        {
+            foreach (IgnoredCollision pair in ignoredCaptureCollisions)
+            {
+                if (pair.stage != null && pair.platform != null)
+                    Physics.IgnoreCollision(pair.stage, pair.platform, false);
+            }
+            ignoredCaptureCollisions.Clear();
         }
 
         private void UpdateCableClosure()
@@ -615,12 +680,12 @@ namespace CZ10BNetRecovery
             float sagY = planeOffset;
             if (captures.Count > 0)
             {
-                List<Vector3> capturedPoints = FlightGlobals.VesselsLoaded
-                    .Where(v => v != null && captures.ContainsKey(v.id) && v.parts != null)
-                    .SelectMany(v => v.parts)
-                    .Select(p => p.FindModuleImplementing<ModuleCatchHook>())
-                    .Where(h => h != null && h.hookState == "Captured")
-                    .SelectMany(h => h.GetHookWorldPoints())
+                // Render the same continuously moving winch points that drive
+                // the joints. Using the live hook position skipped the payout
+                // path visually and produced the feedback 7 -> 8 discontinuity.
+                List<Vector3> capturedPoints = captureTethers.Values
+                    .Where(t => t != null && t.winchBody != null)
+                    .Select(t => t.currentWorld)
                     .Select(WorldToNet)
                     .ToList();
                 if (capturedPoints.Count > 0)

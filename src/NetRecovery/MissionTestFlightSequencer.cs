@@ -35,6 +35,7 @@ namespace CZ10BNetRecovery
         private bool seaPlacementReleased;
         private float seaReleaseAt;
         private float maxHighAngularRate;
+        private float maxAscentCoastAngularRate;
         private bool upperInsertionReleased;
         private bool upperCutoffCommanded;
         private bool seaStationDeferred;
@@ -98,6 +99,10 @@ namespace CZ10BNetRecovery
                 if (upperSeparated && booster.altitude > 10000)
                     maxHighAngularRate = Mathf.Max(maxHighAngularRate,
                         booster.angularVelocity.magnitude * Mathf.Rad2Deg);
+                if (upperSeparated && booster.verticalSpeed > 0.5d)
+                    maxAscentCoastAngularRate = Mathf.Max(
+                        maxAscentCoastAngularRate,
+                        booster.angularVelocity.magnitude * Mathf.Rad2Deg);
                 ModuleEngines engine = booster.parts
                     .Select(p => p.FindModuleImplementing<ModuleEngines>())
                     .FirstOrDefault(e => e != null);
@@ -108,8 +113,12 @@ namespace CZ10BNetRecovery
             if (separatedNow && !upperInsertionReleased)
             {
                 ExtendAllRanges(upper.vesselRanges);
-                if (!upperCutoffCommanded && upper.orbit != null &&
-                    upper.orbit.PeA >= 90000d)
+                bool nominalUpperOrbit = upper.orbit != null &&
+                    upper.orbit.PeA >= 90000d;
+                bool safeUpperOrbit = upper.orbit != null &&
+                    upper.orbit.PeA >= 72000d && upper.orbit.ApA >= 120000d;
+                if (!upperCutoffCommanded &&
+                    (nominalUpperOrbit || safeUpperOrbit))
                 {
                     foreach (Part part in upper.parts)
                     {
@@ -123,7 +132,7 @@ namespace CZ10BNetRecovery
                         "[CZ10BNetRecovery] UPPER_STAGE_CUTOFF apoapsis={0:F0} periapsis={1:F0}",
                         upper.orbit.ApA, upper.orbit.PeA));
                 }
-                if (upper.orbit != null && upper.orbit.PeA >= 90000d &&
+                if (upper.orbit != null && upper.orbit.PeA >= 72000d &&
                     UpperStageThrust(upper) < 1f)
                 {
                     RestoreDefaultRanges(upper.vesselRanges);
@@ -180,7 +189,8 @@ namespace CZ10BNetRecovery
                 if (stableCapturedAt >= 0f && elapsed - stableCapturedAt >= 8f &&
                     everPowered && reachedAltitude && upperSeparated)
                     Report(separationPropellantFraction >= 0f &&
-                           separationPropellantFraction <= 0.205f, hook);
+                           separationPropellantFraction <= 0.205f &&
+                           maxAscentCoastAngularRate <= 5f, hook);
                 else if (elapsed - capturedAt >= 30f)
                     Report(false, hook);
             }
@@ -201,7 +211,7 @@ namespace CZ10BNetRecovery
                         seaPlatform.mainBody.GetWorldSurfacePosition(
                             seaPlatform.latitude, seaPlatform.longitude, 0));
                 Debug.Log(string.Format(
-                    "[CZ10BNetRecovery] {0}_STATUS t={1:F1} altitude={2:F0} apoapsis={3:F0} vertical={4:F1} horizontal={5:F1} reserve={6:F4} lat={7:F5} lon={8:F5} targetDistance={9:F0} powered={10} high={11} separated={12} hook={13} net={14} cableError={15:F2} sag={16:F2} maxHighAngular={17:F2} angular={18:F2} platformTilt={19:F2} stableFor={20:F1}",
+                    "[CZ10BNetRecovery] {0}_STATUS t={1:F1} altitude={2:F0} apoapsis={3:F0} vertical={4:F1} horizontal={5:F1} reserve={6:F4} lat={7:F5} lon={8:F5} targetDistance={9:F0} powered={10} high={11} separated={12} hook={13} net={14} cableError={15:F2} sag={16:F2} maxHighAngular={17:F2} angular={18:F2} platformTilt={19:F2} stableFor={20:F1} maxAscentCoastAngular={21:F2}",
                     Prefix,
                     elapsed, booster == null ? -1 : booster.altitude,
                     booster == null || booster.orbit == null ? -1 :
@@ -220,7 +230,8 @@ namespace CZ10BNetRecovery
                     booster == null ? -1f :
                         booster.angularVelocity.magnitude * Mathf.Rad2Deg,
                     SeaPlatformTilt(net), stableCapturedAt < 0f ? 0f :
-                        elapsed - stableCapturedAt));
+                        elapsed - stableCapturedAt,
+                    maxAscentCoastAngularRate));
                 if (seaMission && seaPlatform != null)
                 {
                     Debug.Log(string.Format(
@@ -305,10 +316,11 @@ namespace CZ10BNetRecovery
             Vessel booster = FindVesselWithPart("CZ10B-DemoBooster");
             float landingFraction = BoosterPropellantFraction(booster);
             string detail = string.Format(
-                " powered={0} high={1} separated={2} hook={3} maxHighAngular={4:F2} separationReserve={5:F4} landingReserve={6:F4}",
+                " powered={0} high={1} separated={2} hook={3} maxHighAngular={4:F2} separationReserve={5:F4} landingReserve={6:F4} maxAscentCoastAngular={7:F2}",
                 everPowered, reachedAltitude, upperSeparated,
                 hook == null ? "missing" : hook.hookState, maxHighAngularRate,
-                separationPropellantFraction, landingFraction);
+                separationPropellantFraction, landingFraction,
+                maxAscentCoastAngularRate);
             if (pass)
                 Debug.Log("[CZ10BNetRecovery] " + Prefix + "_PASS" + detail);
             else
@@ -336,24 +348,13 @@ namespace CZ10BNetRecovery
                 startLongitude, platform.altitude);
             seaSurfaceRotationOffset = Quaternion.Inverse(startSurfaceFrame)
                 * platform.transform.rotation;
-            // The fuel-budget ascent now carries useful horizontal velocity all
-            // the way to a much later separation.  Park the ship near the
-            // drag-aware ballistic footprint instead of spending recovery fuel
-            // cancelling that velocity near apogee.
-            seaLongitude = startLongitude + 72.4013;
+            // The slower dense-air turn and 40 km entry burn put the measured
+            // uncorrected footprint about 52.3 degrees east of KSC.  Place the
+            // ship there so the 30 km planner begins inside the same local
+            // surface frame instead of seeing a 200 km curvature error.
+            const double measuredFootprintOffset = 52.278d;
+            seaLongitude = startLongitude + measuredFootprintOffset;
             seaTerrainAltitude = TerrainAltitude(body, seaLatitude, seaLongitude);
-            for (double offset = 72.4013; offset <= 75.4013; offset += 0.20)
-            {
-                double candidateLongitude = startLongitude + offset;
-                double candidateTerrain = TerrainAltitude(body, seaLatitude,
-                    candidateLongitude);
-                if (candidateTerrain <= 0.5)
-                {
-                    seaLongitude = candidateLongitude;
-                    seaTerrainAltitude = candidateTerrain;
-                    break;
-                }
-            }
             // A loaded off-rails vessel cannot reliably cross tens of
             // kilometres in one SetPosition call; KSP's floating-origin and
             // collision enhancement clamp the move.  Update the packed orbit

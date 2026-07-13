@@ -60,14 +60,14 @@ namespace CZ10BNetRecovery
                 return;
 
             saveName = File.ReadAllText(marker).Trim();
-            SetNextKscLocalNoon();
+            SetNextKscLocalSixAm();
             readyAt = Time.realtimeSinceStartup + 3f;
             pending = true;
             Debug.Log("[CZ10BNetRecovery] " + logPrefix +
                       "_SPACECENTER_READY save=" + saveName);
         }
 
-        private static void SetNextKscLocalNoon()
+        private static void SetNextKscLocalSixAm()
         {
             CelestialBody kerbin = FlightGlobals.GetBodyByName("Kerbin");
             CelestialBody sun = FlightGlobals.GetBodyByName("Sun");
@@ -89,11 +89,15 @@ namespace CZ10BNetRecovery
             if (angle < 0)
                 angle += Math.PI * 2;
             double delta = angle / (Math.PI * 2) * kerbin.rotationPeriod;
+            // Solar 06:00 is one quarter rotation before local noon. Launching
+            // at sunrise makes the downrange recovery site approach midday
+            // instead of sunset after the roughly twelve-minute mission.
+            delta -= kerbin.rotationPeriod * 0.25d;
             if (delta < 60)
                 delta += kerbin.rotationPeriod;
             Planetarium.SetUniversalTime(Planetarium.GetUniversalTime() + delta);
             Debug.Log(string.Format(
-                "[CZ10BNetRecovery] KSC_LOCAL_NOON_SET delta={0:F0}s ut={1:F0}",
+                "[CZ10BNetRecovery] KSC_LOCAL_0600_SET delta={0:F0}s ut={1:F0}",
                 delta, Planetarium.GetUniversalTime()));
         }
 

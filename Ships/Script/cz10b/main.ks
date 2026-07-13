@@ -145,14 +145,28 @@ LOG MISSION_ID + ",STAGE_RESERVE," + ROUND(TIME:SECONDS,3)
     TO "0:/cz10b/telemetry.csv".
 LOCAL SEPARATION_ATTITUDE IS SHIP:FACING.
 LOCK STEERING TO SEPARATION_ATTITUDE.
-WAIT 0.5.
+// Remove first-stage thrust authority before opening the interstage. A throttle
+// pulse used to restart the higher-TWR booster while both stages still shared
+// one vessel, briefly driving it into the upper stage.
+FOR ENGINE IN MISSION_ENGINES {
+    IF ENGINE:NAME = "CZ10B-DemoBooster" {
+        SET ENGINE:THRUSTLIMIT TO 0.
+    }
+}
+LOCAL THRUST_UNLOAD_DEADLINE IS TIME:SECONDS + 2.
+LOCAL BOOSTER_LIVE_THRUST IS 1.
+UNTIL BOOSTER_LIVE_THRUST < 0.5 OR TIME:SECONDS >= THRUST_UNLOAD_DEADLINE {
+    SET BOOSTER_LIVE_THRUST TO 0.
+    FOR ENGINE IN MISSION_ENGINES {
+        IF ENGINE:NAME = "CZ10B-DemoBooster" {
+            SET BOOSTER_LIVE_THRUST TO BOOSTER_LIVE_THRUST + ENGINE:THRUST.
+        }
+    }
+    WAIT 0.02.
+}
+WAIT 0.3.
 // Direct part operations remain reliable after the integrated test rail has
 // been programmatically released, while KSP's UI staging icon list may not.
-FOR ENGINE IN MISSION_ENGINES {
-    IF ENGINE:NAME = "CZ10B-DemoUpperStage" { ENGINE:ACTIVATE. }
-}
-LOCK THROTTLE TO 1.
-WAIT 0.2.
 LOCAL INTERSTAGES IS SHIP:PARTSNAMED("Decoupler.2").
 IF INTERSTAGES:LENGTH = 0 {
     PRINT "ERROR: interstage not found".
@@ -165,20 +179,28 @@ IF DECOUPLE_EVENTS:LENGTH = 0 {
     SHUTDOWN.
 }
 DECOUPLE_MODULE:DOEVENT(DECOUPLE_EVENTS[0]).
-WAIT 0.2.
+WAIT 0.6.
+FOR ENGINE IN MISSION_ENGINES {
+    IF ENGINE:NAME = "CZ10B-DemoBooster" {
+        SET ENGINE:THRUSTLIMIT TO 100.
+    }
+}
 LOCK THROTTLE TO 0.
 PRINT "STAGE SEPARATION - BOOSTER GUIDANCE ACTIVE" AT(0,11).
 BRAKES ON. // four stock airbrakes serve as the grid-fin analogue
 
-// 1) Ballistic coast. Hold the separation attitude inertially through apogee.
-// Surface prograde rotates extremely quickly when vertical speed crosses zero;
-// chasing it made the long empty stage oscillate even with zero throttle.
-PRINT "INERTIAL COAST THROUGH APOGEE" AT(0,11).
+// 1) Rate-damped ascent coast.  Holding the separation attitude made the
+// reaction wheels chase an orientation through the rapidly changing surface
+// frame, while a fully passive stage was aerodynamically unstable.  kOS's
+// special "kill" target commands angular-rate damping without chasing a
+// changing direction.
+PRINT "RATE-DAMPED ASCENT COAST" AT(0,11).
 LOCK THROTTLE TO 0.
-LOCAL COAST_ATTITUDE IS SHIP:FACING.
-LOCK STEERING TO COAST_ATTITUDE.
+SAS OFF.
+RCS ON.
+LOCK STEERING TO "kill".
 SET LAST_LOG TO TIME:SECONDS.
-UNTIL SHIP:VERTICALSPEED <= COAST_TRACK_DESCENT_SPEED {
+UNTIL SHIP:VERTICALSPEED <= 0 {
     IF TIME:SECONDS - LAST_LOG >= TELEMETRY_PERIOD {
         WRITE_TELEMETRY("COAST", MISSION_ID, SHIP:ALTITUDE, 0,
             SHIP:VERTICALSPEED, SHIP:GROUNDSPEED,
@@ -188,26 +210,63 @@ UNTIL SHIP:VERTICALSPEED <= COAST_TRACK_DESCENT_SPEED {
     WAIT 0.02.
 }
 
-// 2) Only after a definite descent rate exists, slew smoothly to retrograde.
-// The command itself is rate-shaped, instead of handing a discontinuously
-// rotating suffix directly to the steering manager.
-PRINT "CONTROLLED POST-APOGEE FLIP" AT(0,11).
+// Keep damping body rates until 50 km on the descending branch. Then turn the
+// nose retrograde so the nozzle points along the surface-velocity vector.
+UNTIL SHIP:ALTITUDE <= ENTRY_RETROGRADE_HEIGHT {
+    IF TIME:SECONDS - LAST_LOG >= TELEMETRY_PERIOD {
+        WRITE_TELEMETRY("COAST", MISSION_ID, SHIP:ALTITUDE, 0,
+            SHIP:VERTICALSPEED, SHIP:GROUNDSPEED,
+            RECOVERY_SHIP:GEOPOSITION:DISTANCE, 0, 0).
+        SET LAST_LOG TO TIME:SECONDS.
+    }
+    WAIT 0.02.
+}
+PRINT "CONTROLLED RETROGRADE ENTRY SLEW" AT(0,11).
+RCS ON.
 LOCAL FLIP_START_TIME IS TIME:SECONDS.
 LOCAL FLIP_START_VECTOR IS SHIP:FACING:FOREVECTOR:NORMALIZED.
-UNTIL TIME:SECONDS - FLIP_START_TIME >= POST_APOGEE_FLIP_SECONDS {
+UNTIL TIME:SECONDS - FLIP_START_TIME >= ENTRY_ATTITUDE_SLEW_SECONDS {
     LOCAL FLIP_BLEND_RAW IS CLAMP((TIME:SECONDS - FLIP_START_TIME)
-        / POST_APOGEE_FLIP_SECONDS, 0, 1).
+        / ENTRY_ATTITUDE_SLEW_SECONDS, 0, 1).
     LOCAL FLIP_BLEND IS FLIP_BLEND_RAW^2 * (3 - 2 * FLIP_BLEND_RAW).
-    // Finish engine-down and keep the body vertical.  The stage deliberately
-    // retains its horizontal velocity instead of pointing retrograde and
-    // cancelling it near apogee.
-    LOCAL FLIP_TARGET IS SHIP:UP:VECTOR:NORMALIZED.
+    LOCAL FLIP_TARGET IS -SHIP:VELOCITY:SURFACE:NORMALIZED.
     LOCAL FLIP_COMMAND IS (FLIP_START_VECTOR * (1 - FLIP_BLEND)
         + FLIP_TARGET * FLIP_BLEND):NORMALIZED.
     LOCK STEERING TO LOOKDIRUP(FLIP_COMMAND, SHIP:UP:VECTOR).
     WAIT 0.05.
 }
 LOCK THROTTLE TO 0.
+LOCK STEERING TO LOOKDIRUP(-SHIP:VELOCITY:SURFACE:NORMALIZED,
+    SHIP:UP:VECTOR).
+
+// 2) Below 40 km, burn retrograde until horizontal surface speed is below
+// 1000 m/s. This deliberately spends some reserve early to reduce heating and
+// gives the 30 km landing planner a much calmer initial state.
+WAIT UNTIL SHIP:ALTITUDE <= ENTRY_DECEL_HEIGHT.
+PRINT "40 KM RETROGRADE ENTRY BURN" AT(0,11).
+LOCAL ENTRY_H_SPEED IS VXCL(SHIP:UP:VECTOR:NORMALIZED,
+    SHIP:VELOCITY:SURFACE):MAG.
+UNTIL ENTRY_H_SPEED <= ENTRY_HORIZONTAL_SPEED
+      OR SHIP:ALTITUDE <= TERMINAL_GUIDANCE_START_HEIGHT {
+    LOCK STEERING TO LOOKDIRUP(-SHIP:VELOCITY:SURFACE:NORMALIZED,
+        SHIP:UP:VECTOR).
+    LOCK THROTTLE TO 1.
+    SET ENTRY_H_SPEED TO VXCL(SHIP:UP:VECTOR:NORMALIZED,
+        SHIP:VELOCITY:SURFACE):MAG.
+    IF TIME:SECONDS - LAST_LOG >= TELEMETRY_PERIOD {
+        WRITE_TELEMETRY("ENTRY_BURN", MISSION_ID, SHIP:ALTITUDE, 0,
+            SHIP:VERTICALSPEED, ENTRY_H_SPEED,
+            RECOVERY_SHIP:GEOPOSITION:DISTANCE, 1, 0).
+        SET LAST_LOG TO TIME:SECONDS.
+    }
+    WAIT 0.02.
+}
+LOCK THROTTLE TO 0.
+UNTIL SHIP:ALTITUDE <= TERMINAL_GUIDANCE_START_HEIGHT {
+    LOCK STEERING TO LOOKDIRUP(-SHIP:VELOCITY:SURFACE:NORMALIZED,
+        SHIP:UP:VECTOR).
+    WAIT 0.02.
+}
 LOCK STEERING TO UP.
 PRINT "DRAG-AWARE BALLISTIC DESCENT" AT(0,11).
 // GFOLD's minimum-time phase is approximated here by a live suicide-burn gate.
@@ -295,10 +354,12 @@ UNTIL TERMINAL_IGNITION {
         LOCK STEERING TO UP.
         LOCK THROTTLE TO 0.
     }
+    // Thirty kilometres is the planning handover, not an instruction to hold
+    // thrust all the way down.  Coast along the predicted footprint and begin
+    // the fixed powered trajectory only at the measured suicide-burn gate.
     SET TERMINAL_IGNITION TO BALLISTIC_VERTICAL_V < 0
-        AND (BALLISTIC_HEIGHT <= TERMINAL_GUIDANCE_START_HEIGHT
-            OR BALLISTIC_HEIGHT <= BALLISTIC_STOP_DISTANCE
-                + BURN_ALTITUDE_MARGIN).
+        AND BALLISTIC_HEIGHT <= BALLISTIC_STOP_DISTANCE
+            + BURN_ALTITUDE_MARGIN.
 
     IF BALLISTIC_NOW - LAST_LOG >= TELEMETRY_PERIOD {
         LOCAL BALLISTIC_PHASE IS "BALLISTIC".
@@ -319,10 +380,11 @@ UNTIL TERMINAL_IGNITION {
     WAIT 0.02.
 }
 
-// Start with one constrained trajectory at the latest safe ignition point,
-// then solve it again from the measured state every half second. Only the
-// final tens of metres use local PID.
-PRINT "ROLLING-TRAJECTORY BURN" AT(0,11).
+// Build one constrained, height-indexed trajectory from the measured 30 km
+// state.  The stage follows this path directly; it does not move the aim point
+// or restart a time-to-go solution after each small tracking error.  Only the
+// final frame entrance uses local damping.
+PRINT "FIXED-TRAJECTORY BURN" AT(0,11).
 LOCAL VERTICAL_INTEGRAL IS 0.
 LOCAL PREVIOUS_TIME IS TIME:SECONDS.
 LOCAL PLAN_UP IS SHIP:UP:VECTOR:NORMALIZED.
@@ -330,22 +392,21 @@ LOCAL PLAN_REL_POS IS NET_POSITION(RECOVERY_SHIP) - SHIP:POSITION.
 LOCAL PLAN_HOOK_HEIGHT IS -VDOT(PLAN_REL_POS, PLAN_UP) + HOOK_ABOVE_COM.
 LOCAL PLAN_REL_VEL IS SHIP:VELOCITY:SURFACE.
 LOCAL PLAN_VERTICAL_V IS VDOT(PLAN_REL_VEL, PLAN_UP).
-LOCAL PLAN_ARRIVAL_SAFETY IS 1.
-IF -PLAN_VERTICAL_V > 800 {
-    SET PLAN_ARRIVAL_SAFETY TO TERMINAL_ARRIVAL_TIME_SAFETY.
-}
-LOCAL PLAN_VERTICAL_TGO IS 2 * MAX(PLAN_HOOK_HEIGHT, 1)
-    / MAX(-PLAN_VERTICAL_V + CAPTURE_FINAL_SPEED, 1)
-    * PLAN_ARRIVAL_SAFETY.
-LOCAL PLAN_TGO IS CLAMP(PLAN_VERTICAL_TGO
-    * TERMINAL_REPLAN_VERTICAL_SCALE,
-    TERMINAL_TGO_MIN, TERMINAL_TGO_MAX).
-LOCAL LIVE_VERTICAL_TGO IS PLAN_TGO.
-LOCAL NEXT_REPLAN_TIME IS TIME:SECONDS + TERMINAL_REPLAN_PERIOD.
+LOCAL PLAN_H_POS IS VXCL(PLAN_UP, PLAN_REL_POS).
+LOCAL PLAN_H_VEL IS VXCL(PLAN_UP, PLAN_REL_VEL).
+LOCAL PLAN_PROGRESS_RATE0 IS MAX(-PLAN_VERTICAL_V,
+    CAPTURE_FINAL_SPEED) / MAX(PLAN_HOOK_HEIGHT, 1).
+// Error derivative with respect to normalized height progress.  Matching this
+// tangent makes the first guidance command continuous with the incoming flight.
+LOCAL PLAN_H_ERROR_SLOPE0 IS -PLAN_H_VEL
+    / MAX(PLAN_PROGRESS_RATE0, 0.0001).
 LOCAL FUEL_URGENT IS FALSE.
 LOCAL WAS_PID_MODE IS FALSE.
 LOCAL CAPTURE_ALIGN_MODE IS FALSE.
 LOCAL WIRE_HOLD_STARTED_AT IS -1.
+LOCAL FINAL_ALIGN_MODE IS FALSE.
+LOCAL FINAL_ALIGN_STARTED_AT IS -1.
+LOCAL FINAL_DESCENT_ARMED IS FALSE.
 LOCAL FILTERED_H_ACCEL IS V(0,0,0).
 SET LAST_LOG TO TIME:SECONDS.
 
@@ -374,6 +435,16 @@ UNTIL HOOK_CAPTURED() {
     IF H_CORRIDOR_MODE AND HORIZONTAL_POS:MAG <= TERMINAL_ALIGN_RANGE {
         SET CAPTURE_ALIGN_MODE TO TRUE.
     }
+    // Enter this state only once.  Holding the latch prevents a small position
+    // excursion from switching the outer controller back on during settling.
+    IF NOT FINAL_ALIGN_MODE
+        AND HOOK_HEIGHT <= FINAL_ALIGN_HEIGHT
+        AND HORIZONTAL_POS:MAG <= FINAL_ALIGN_RANGE {
+        SET FINAL_ALIGN_MODE TO TRUE.
+        SET FINAL_ALIGN_STARTED_AT TO NOW.
+        SET VERTICAL_INTEGRAL TO 0.
+        PRINT "FINAL ALIGN HOLD" AT(0,11).
+    }
     IF PID_MODE AND NOT WAS_PID_MODE {
         SET VERTICAL_INTEGRAL TO 0.
         PRINT "NEAR-FIELD PID HANDOVER" AT(0,11).
@@ -393,32 +464,11 @@ UNTIL HOOK_CAPTURED() {
     // while the plugin GUI already reports Closed. The hold is therefore a
     // one-shot timed state, not an unlimited dependency on that field.
     LOCAL WIRE_REQUIRED IS WIRE_GEOMETRY_REQUIRED
-        AND NOW - WIRE_HOLD_STARTED_AT < WIRE_HOLD_MAX_SECONDS.
+        AND NOW - WIRE_HOLD_STARTED_AT < WIRE_HOLD_MAX_SECONDS
+        AND NOT FINAL_ALIGN_MODE.
 
-    // Receding-horizon update. Recent position and velocity implicitly absorb
-    // any error in the drag estimate, thrust response or ship placement. The
-    // controller flies only the next short segment before solving again.
-    IF NOT PID_MODE AND NOW >= NEXT_REPLAN_TIME {
-        LOCAL REPLAN_SAFETY IS 1.
-        IF -VERTICAL_V > 800 {
-            SET REPLAN_SAFETY TO TERMINAL_ARRIVAL_TIME_SAFETY.
-        }
-        LOCAL REPLAN_VERTICAL_TGO IS 2 * MAX(HOOK_HEIGHT, 1)
-            / MAX(-VERTICAL_V + CAPTURE_FINAL_SPEED, 1)
-            * REPLAN_SAFETY.
-        LOCAL REPLAN_TGO IS CLAMP(REPLAN_VERTICAL_TGO
-            * TERMINAL_REPLAN_VERTICAL_SCALE,
-            TERMINAL_TGO_MIN, TERMINAL_TGO_MAX).
-        SET FUEL_URGENT TO BOOSTER_PROPELLANT_FRACTION()
-            < TERMINAL_LOW_FUEL_FRACTION.
-        IF FUEL_URGENT {
-            SET REPLAN_TGO TO MAX(TERMINAL_TGO_MIN,
-                REPLAN_TGO * TERMINAL_LOW_FUEL_TGO_SCALE).
-        }
-        SET LIVE_VERTICAL_TGO TO REPLAN_TGO.
-        SET NEXT_REPLAN_TIME TO NOW + TERMINAL_REPLAN_PERIOD.
-    }
-    LOCAL TGO IS MAX(LIVE_VERTICAL_TGO, 1.5).
+    SET FUEL_URGENT TO BOOSTER_PROPELLANT_FRACTION()
+        < TERMINAL_LOW_FUEL_FRACTION.
     // A height-indexed descent corridor guarantees continued downward motion:
     // high energy is accepted above the ship, while low speed is reserved for
     // the final tens of metres. This avoids both an expired-deadline dive and
@@ -428,12 +478,17 @@ UNTIL HOOK_CAPTURED() {
             * TERMINAL_DESCENT_SPEED_PER_METER)).
     IF FUEL_URGENT {
         SET CORRIDOR_DOWN_SPEED TO CORRIDOR_DOWN_SPEED
-            / TERMINAL_LOW_FUEL_TGO_SCALE.
+            * TERMINAL_LOW_FUEL_DESCENT_SCALE.
     }
     LOCAL TARGET_VERTICAL_V IS -CORRIDOR_DOWN_SPEED.
     LOCAL NET_VERTICAL_ACCEL IS V_VEL_KP
         * (TARGET_VERTICAL_V - VERTICAL_V).
-    IF VERTICAL_V < 0 {
+    // Do not pay gravity-compensation fuel while the stage is already falling
+    // more slowly than the permitted descent corridor.  The previous gate
+    // held roughly one-g thrust from 30 km and exhausted the recovery reserve
+    // around 5 km.  Braking is required only when downward speed exceeds the
+    // current height-indexed limit.
+    IF VERTICAL_V < TARGET_VERTICAL_V {
         // Preserve the full uncertainty margin at high-energy ignition, then
         // taper it away as measurements improve. Keeping 1.5 all the way down
         // would deliberately stop the stage hundreds of metres too early.
@@ -447,13 +502,41 @@ UNTIL HOOK_CAPTURED() {
             SAFE_BRAKING_ACCEL).
     }
     LOCAL VERTICAL_THRUST_CMD IS G_ACC + NET_VERTICAL_ACCEL.
-    // Horizontal guidance uses the freshly solved feasible time, never an
-    // expired deadline. The cubic boundary conditions include both position
-    // and velocity, so braking starts before the stage crosses the ship.
-    LOCAL HORIZONTAL_GUIDANCE_TGO IS MAX(LIVE_VERTICAL_TGO
-        * TERMINAL_HORIZONTAL_TGO_SCALE, TERMINAL_HORIZONTAL_TGO_MIN).
-    LOCAL H_ACCEL IS 6 * HORIZONTAL_POS / (HORIZONTAL_GUIDANCE_TGO^2)
-        - 4 * HORIZONTAL_VEL / HORIZONTAL_GUIDANCE_TGO.
+    // Cubic Hermite reference indexed by lost height.  Because progress comes
+    // from altitude rather than a repeatedly extended deadline, the reference
+    // reaches the frame entrance exactly once and cannot jump behind the stage.
+    LOCAL PLAN_PROGRESS IS CLAMP(1 - HOOK_HEIGHT
+        / MAX(PLAN_HOOK_HEIGHT, 1), 0, 1).
+    LOCAL PLAN_PROGRESS2 IS PLAN_PROGRESS^2.
+    LOCAL PLAN_PROGRESS3 IS PLAN_PROGRESS^3.
+    LOCAL PLAN_H00 IS 2 * PLAN_PROGRESS3 - 3 * PLAN_PROGRESS2 + 1.
+    LOCAL PLAN_H10 IS PLAN_PROGRESS3 - 2 * PLAN_PROGRESS2 + PLAN_PROGRESS.
+    LOCAL PLAN_REFERENCE_H_POS IS PLAN_H_POS * PLAN_H00
+        + PLAN_H_ERROR_SLOPE0 * PLAN_H10.
+    LOCAL PLAN_D_ERROR_DS IS PLAN_H_POS
+        * (6 * PLAN_PROGRESS2 - 6 * PLAN_PROGRESS)
+        + PLAN_H_ERROR_SLOPE0
+        * (3 * PLAN_PROGRESS2 - 4 * PLAN_PROGRESS + 1).
+    LOCAL PLAN_D2_ERROR_DS2 IS PLAN_H_POS * (12 * PLAN_PROGRESS - 6)
+        + PLAN_H_ERROR_SLOPE0 * (6 * PLAN_PROGRESS - 4).
+    LOCAL PLAN_PROGRESS_RATE IS MAX(-VERTICAL_V,
+        CAPTURE_FINAL_SPEED) / MAX(PLAN_HOOK_HEIGHT, 1).
+    LOCAL PLAN_REFERENCE_H_VEL IS -PLAN_D_ERROR_DS
+        * PLAN_PROGRESS_RATE.
+    // The cubic supplies the route, while this stopping envelope guarantees
+    // that its velocity cannot carry the long stage across the frame before
+    // attitude lag has produced the requested braking acceleration.
+    LOCAL PLAN_STOP_SPEED IS SQRT(2 * TERMINAL_PLAN_STOP_ACCEL
+        * MAX(HORIZONTAL_POS:MAG - TERMINAL_HORIZONTAL_DEADBAND, 0)).
+    SET PLAN_REFERENCE_H_VEL TO CLAMPV(PLAN_REFERENCE_H_VEL,
+        PLAN_STOP_SPEED).
+    LOCAL PLAN_FEEDFORWARD_H_ACCEL IS -PLAN_D2_ERROR_DS2
+        * PLAN_PROGRESS_RATE^2.
+    LOCAL H_ACCEL IS PLAN_FEEDFORWARD_H_ACCEL
+        + (HORIZONTAL_POS - PLAN_REFERENCE_H_POS)
+            * TERMINAL_PLAN_POSITION_GAIN
+        + (PLAN_REFERENCE_H_VEL - HORIZONTAL_VEL)
+            * TERMINAL_PLAN_VELOCITY_GAIN.
     SET H_ACCEL TO CLAMPV(H_ACCEL, TERMINAL_MAX_HORIZONTAL_ACCEL).
 
     IF H_CORRIDOR_MODE {
@@ -467,10 +550,12 @@ UNTIL HOOK_CAPTURED() {
             - TERMINAL_HORIZONTAL_DEADBAND, 0).
         LOCAL PID_STOP_SPEED IS SQRT(2 * TERMINAL_HORIZONTAL_STOP_ACCEL
             * PID_STOP_RANGE).
-        LOCAL PID_HEIGHT_SPEED IS MAX(TERMINAL_HORIZONTAL_SPEED,
-            MIN(TERMINAL_HORIZONTAL_CORRIDOR_SPEED,
-                MAX(HOOK_HEIGHT, 0) * 0.12)).
-        LOCAL PID_H_SPEED IS MIN(PID_STOP_SPEED, PID_HEIGHT_SPEED).
+        // Do not taper horizontal speed merely because altitude is low while
+        // the stage is still hundreds of metres from the frame.  That old
+        // height cap stopped valid approaches about 350 m short.  Range and
+        // available stopping acceleration are the actual constraints.
+        LOCAL PID_H_SPEED IS MIN(PID_STOP_SPEED,
+            TERMINAL_HORIZONTAL_CORRIDOR_SPEED).
         IF CAPTURE_ALIGN_MODE {
             // First damp residual speed, then follow a linear velocity field.
             // The lower inner-loop gain accounts for the long stage's several-
@@ -490,6 +575,36 @@ UNTIL HOOK_CAPTURED() {
         }
         SET H_ACCEL TO CLAMPV((DESIRED_H_VEL - HORIZONTAL_VEL)
             * PID_VELOCITY_GAIN, TERMINAL_MAX_HORIZONTAL_ACCEL).
+    }
+
+    IF FINAL_ALIGN_MODE AND NOT FINAL_DESCENT_ARMED {
+        // The long stage has about a 1.5 s attitude response.  A deliberately
+        // slower velocity loop settles that lag while the stage is held above
+        // the frame, rather than commanding another full-speed centre pass.
+        LOCAL FINAL_STOP_RANGE IS HORIZONTAL_POS:MAG.
+        LOCAL FINAL_H_SPEED IS MIN(FINAL_ALIGN_SPEED,
+            FINAL_STOP_RANGE * FINAL_ALIGN_POSITION_GAIN).
+        LOCAL FINAL_DESIRED_H_VEL IS V(0,0,0).
+        IF HORIZONTAL_POS:MAG > 0.25 {
+            SET FINAL_DESIRED_H_VEL TO HORIZONTAL_POS:NORMALIZED
+                * FINAL_H_SPEED.
+        }
+        SET H_ACCEL TO CLAMPV((FINAL_DESIRED_H_VEL - HORIZONTAL_VEL)
+            * FINAL_ALIGN_VELOCITY_GAIN,
+            TERMINAL_MAX_HORIZONTAL_ACCEL).
+    }
+
+    LOCAL STAGE_TILT IS VANG(SHIP:FACING:FOREVECTOR, UP_VEC).
+    IF FINAL_ALIGN_MODE AND NOT FINAL_DESCENT_ARMED
+        AND HORIZONTAL_POS:MAG <= FINAL_ALIGN_READY_ERROR
+        AND HORIZONTAL_VEL:MAG <= FINAL_ALIGN_READY_SPEED
+        AND STAGE_TILT <= FINAL_ALIGN_READY_TILT {
+        // From here to capture, position error is intentionally not chased.
+        // Only residual velocity is damped, so the controller cannot reverse
+        // into another centre-seeking pass after crossing the aim point.
+        SET FINAL_DESCENT_ARMED TO TRUE.
+        SET FILTERED_H_ACCEL TO V(0,0,0).
+        PRINT "VERTICAL CAPTURE COMMITTED" AT(0,11).
     }
 
     IF PID_MODE {
@@ -515,6 +630,23 @@ UNTIL HOOK_CAPTURED() {
             + V_VEL_KP * (PID_TARGET_V - VERTICAL_V)
             + V_VEL_KI * VERTICAL_INTEGRAL.
     }
+    IF FINAL_ALIGN_MODE AND NOT FINAL_DESCENT_ARMED {
+        // Twelve seconds is a bounded settle, not a hover-until-perfect loop.
+        // After that window, continue downward slowly while alignment finishes.
+        LOCAL FINAL_TARGET_V IS 0.
+        IF NOW - FINAL_ALIGN_STARTED_AT >= FINAL_ALIGN_HOLD_SECONDS {
+            SET FINAL_TARGET_V TO -POST_WIRE_CROSSING_SPEED.
+        }
+        SET VERTICAL_INTEGRAL TO CLAMP(VERTICAL_INTEGRAL
+            + (FINAL_TARGET_V - VERTICAL_V) * DT, -10, 10).
+        SET VERTICAL_THRUST_CMD TO G_ACC
+            + V_VEL_KP * (FINAL_TARGET_V - VERTICAL_V)
+            + V_VEL_KI * VERTICAL_INTEGRAL.
+    }
+    IF FINAL_DESCENT_ARMED {
+        SET H_ACCEL TO CLAMPV(-HORIZONTAL_VEL
+            * FINAL_CAPTURE_VELOCITY_GAIN, FINAL_CAPTURE_MAX_ACCEL).
+    }
     SET FILTERED_H_ACCEL TO FILTERED_H_ACCEL * (1 - TERMINAL_ACCEL_FILTER)
         + H_ACCEL * TERMINAL_ACCEL_FILTER.
     SET H_ACCEL TO FILTERED_H_ACCEL.
@@ -539,6 +671,8 @@ UNTIL HOOK_CAPTURED() {
     IF H_CORRIDOR_MODE { SET GUIDANCE_PHASE TO "H_STOPPING". }
     IF CAPTURE_ALIGN_MODE { SET GUIDANCE_PHASE TO "H_ALIGN". }
     IF PID_MODE { SET GUIDANCE_PHASE TO "PID_TERMINAL". }
+    IF FINAL_ALIGN_MODE { SET GUIDANCE_PHASE TO "FINAL_ALIGN". }
+    IF FINAL_DESCENT_ARMED { SET GUIDANCE_PHASE TO "VERTICAL_CAPTURE". }
     IF NOW - LAST_LOG >= TELEMETRY_PERIOD {
         WRITE_TELEMETRY(GUIDANCE_PHASE, MISSION_ID, SHIP:ALTITUDE, HOOK_HEIGHT,
             VERTICAL_V, HORIZONTAL_VEL:MAG, HORIZONTAL_POS:MAG,

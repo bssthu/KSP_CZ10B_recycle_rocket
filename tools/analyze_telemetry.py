@@ -53,16 +53,22 @@ def main() -> int:
         name: sum(row["phase"] == name for row in mission_rows)
         for name in (
             "ASCENT", "COAST", "BOOSTBACK", "ENTRY", "TRAJECTORY",
-            "H_STOPPING", "PID_TERMINAL", "TERMINAL",
+            "H_STOPPING", "H_ALIGN", "PID_TERMINAL", "FINAL_ALIGN",
+            "VERTICAL_CAPTURE", "TERMINAL",
         )
     }
     phase = next(
-        (name for name in ("PID_TERMINAL", "TERMINAL", "HOVER_TEST", "RETURN")
+        (name for name in (
+            "VERTICAL_CAPTURE", "FINAL_ALIGN", "PID_TERMINAL", "TERMINAL",
+            "HOVER_TEST", "RETURN",
+        )
          if any(row["phase"] == name for row in mission_rows)),
         "",
     )
-    terminal_names = {"TRAJECTORY", "H_STOPPING", "PID_TERMINAL"} \
-        if phase == "PID_TERMINAL" else {phase}
+    terminal_names = {
+        "TRAJECTORY", "H_STOPPING", "H_ALIGN", "PID_TERMINAL",
+        "FINAL_ALIGN", "VERTICAL_CAPTURE",
+    } if phase in {"PID_TERMINAL", "FINAL_ALIGN", "VERTICAL_CAPTURE"} else {phase}
     flight = [row for row in mission_rows if row["phase"] in terminal_names]
     if not flight:
         present = sorted({str(row["phase"]) for row in mission_rows})
@@ -107,7 +113,9 @@ def main() -> int:
     print(f"rebound_after_entering_5m={rebound_after_center:.2f} m")
 
     hints: list[str] = []
-    if phase in {"RETURN", "TERMINAL", "PID_TERMINAL"} and float(entry["v_vertical"]) < -5:
+    if phase in {
+        "RETURN", "TERMINAL", "PID_TERMINAL", "FINAL_ALIGN", "VERTICAL_CAPTURE",
+    } and float(entry["v_vertical"]) < -5:
         hints.append("terminal descent still fast: start the single ENTRY burn earlier or extend its maximum time")
     if saturated > 0.25:
         hints.append("insufficient control authority: reduce landing mass or use a stronger engine")
@@ -117,7 +125,7 @@ def main() -> int:
         hints.append("lateral overshoot: enter HORIZONTAL_CORRIDOR_HEIGHT earlier or lower TERMINAL_HORIZONTAL_STOP_ACCEL")
     elif float(entry["v_horizontal"]) > 3.5:
         hints.append("final lateral speed high: increase H_VEL_KP only after checking the stopping corridor")
-    if max_tilt_low >= 11.8:
+    if float(entry["tilt"]) >= 11.8:
         hints.append("tilt-limited near net: correct the trajectory earlier; do not raise LANDING_MAX_TILT first")
     if not hints:
         hints.append("terminal metrics are inside the nominal capture envelope; inspect KSP.log for CAPTURE/REJECT")

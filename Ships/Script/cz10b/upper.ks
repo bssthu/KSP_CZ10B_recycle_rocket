@@ -4,7 +4,8 @@
 // apoapsis; a short prograde burn around apoapsis then raises periapsis above
 // the atmosphere without interfering with the booster's recovery computer.
 LOCAL TARGET_APOAPSIS IS 100000.
-LOCAL TARGET_PERIAPSIS IS 95000.
+LOCAL TARGET_PERIAPSIS IS 90000.
+LOCAL SAFE_APOAPSIS IS 120000.
 
 SAS OFF.
 RCS ON.
@@ -16,20 +17,15 @@ LOCK THROTTLE TO 1.
 WAIT UNTIL SHIP:APOAPSIS >= TARGET_APOAPSIS.
 LOCK THROTTLE TO 0.
 
-// At this scale the Poodle-class stage needs only a few seconds near apoapsis.
-WAIT UNTIL ETA:APOAPSIS <= 8 OR SHIP:VERTICALSPEED < 0.
+// The enlarged payload needs a finite burn centred on apoapsis.  Begin early
+// and use full thrust; the former 10--20% burn started too late, continued far
+// down the descending branch and raised apoapsis much more than periapsis.
+WAIT UNTIL ETA:APOAPSIS <= 20 OR SHIP:VERTICALSPEED < 0.
 LOCK STEERING TO PROGRADE.
-LOCK THROTTLE TO 0.20.
-LOCAL CIRCULAR_SPEED IS SQRT(SHIP:BODY:MU
-    / (SHIP:BODY:RADIUS + SHIP:ALTITUDE)).
+LOCK THROTTLE TO 1.
 UNTIL SHIP:PERIAPSIS >= TARGET_PERIAPSIS
-      OR SHIP:VELOCITY:ORBIT:MAG >= CIRCULAR_SPEED * 0.998
-      OR SHIP:APOAPSIS >= 110000 {
-    SET CIRCULAR_SPEED TO SQRT(SHIP:BODY:MU
-        / (SHIP:BODY:RADIUS + SHIP:ALTITUDE)).
-    IF SHIP:APOAPSIS > 110000 {
-        LOCK THROTTLE TO 0.20.
-    }
+      OR (SHIP:PERIAPSIS >= 72000
+          AND SHIP:APOAPSIS >= SAFE_APOAPSIS) {
     WAIT 0.02.
 }
 LOCK THROTTLE TO 0.
