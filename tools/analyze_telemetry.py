@@ -93,9 +93,13 @@ def main() -> int:
                 max(float(current["ut"]) - float(previous["ut"]), 0.0), 0.5
             )
         error = float(current["h_error"])
-        if error <= 5.0:
+        height = float(current["hook_height"])
+        # Audit the approach from 5 km, rather than starting at the 2 km
+        # waypoint.  The real stage can pass within a few metres above 2 km
+        # and then drift more than 100 m before the old audit even began.
+        if height <= 5000.0 and error <= 10.0:
             entered_center = True
-        elif entered_center:
+        elif height <= 5000.0 and entered_center:
             rebound_after_center = max(rebound_after_center, error)
 
     print(f"mission={mission} phase={phase} samples={len(flight)}")
@@ -110,7 +114,7 @@ def main() -> int:
     print(f"throttle_saturation_fraction={saturated:.1%}")
     print(f"max_tilt_below_100m={max_tilt_low:.1f} deg")
     print(f"hover_time_between_12m_and_150m={hover_time:.2f} s")
-    print(f"rebound_after_entering_5m={rebound_after_center:.2f} m")
+    print(f"rebound_after_entering_10m_below_5km={rebound_after_center:.2f} m")
 
     hints: list[str] = []
     if phase in {

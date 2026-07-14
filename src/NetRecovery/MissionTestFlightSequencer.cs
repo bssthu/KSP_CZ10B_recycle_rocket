@@ -416,7 +416,11 @@ namespace CZ10BNetRecovery
                 .Aggregate(Vector3.zero, (sum, point) => sum + point) /
                 Mathf.Max(1, hook.virtualHookCount);
             float hookHeight = net.HeightAbovePlane(hookCentre);
-            if (hookHeight > 2000f)
+            // Begin the no-rebound audit above the formal 2 km waypoint.  A
+            // previous flight passed within 1.4 m at 2.76 km with 13.6 m/s of
+            // lateral speed, then drifted 114 m away; limiting this audit to
+            // below 2 km hid exactly the overshoot it is meant to reject.
+            if (hookHeight > 5000f)
                 return;
 
             double horizontalError = Vector3d.Distance(
@@ -429,6 +433,8 @@ namespace CZ10BNetRecovery
             if (terminalCenterSeen)
                 maxTerminalReboundAfterCenter = System.Math.Max(
                     maxTerminalReboundAfterCenter, horizontalError);
+            if (hookHeight > 2000f)
+                return;
             if (terminalWaypointRecorded)
                 return;
 

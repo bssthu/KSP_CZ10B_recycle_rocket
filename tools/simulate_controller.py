@@ -18,9 +18,9 @@ CAPTURE_SPEED = 0.65
 NET_MAX_VERTICAL = 7.5
 NET_MAX_LATERAL = 4.0
 NET_HALF_WIDTH = 12.0
-LOW_FUEL_FRACTION = 0.01
+LOW_FUEL_FRACTION = 0.02
 LOW_FUEL_DESCENT_SCALE = 1.28
-LOW_FUEL_CAPTURE_SPEED = 2.5
+LOW_FUEL_CAPTURE_SPEED = 4.0
 RECOVERY_START_FRACTION = 0.20
 DESCENT_MAX_SPEED = 700.0
 TERMINAL_NOMINAL_THRUST_FRACTION = 0.75
@@ -57,13 +57,13 @@ HORIZONTAL_CORRIDOR_SPEED = 150.0
 HORIZONTAL_STOP_ACCEL = 1.0
 HORIZONTAL_DEADBAND = 3.0
 HORIZONTAL_VELOCITY_GAIN = 1.0
-HORIZONTAL_ALIGN_RANGE = 400.0
-HORIZONTAL_ALIGN_SPEED = 12.0
-HORIZONTAL_ALIGN_POSITION_GAIN = 0.10
-HORIZONTAL_ALIGN_VELOCITY_GAIN = 0.65
-FINAL_ALIGN_HEIGHT = 45.0
+HORIZONTAL_ALIGN_RANGE = 300.0
+HORIZONTAL_ALIGN_SPEED = 30.0
+HORIZONTAL_ALIGN_POSITION_GAIN = 0.15
+HORIZONTAL_ALIGN_VELOCITY_GAIN = 2.00
+FINAL_ALIGN_HEIGHT = 65.0
 FINAL_ALIGN_RANGE = 100.0
-FINAL_ALIGN_HOLD_SECONDS = 12.0
+FINAL_ALIGN_HOLD_SECONDS = 0.0
 FINAL_ALIGN_SPEED = 3.0
 FINAL_ALIGN_POSITION_GAIN = 0.05
 FINAL_ALIGN_VELOCITY_GAIN = 0.40
@@ -486,11 +486,15 @@ def run(case: Case) -> Result:
             ENTRY_MAX_TILT * altitude_blend
             + LANDING_MAX_TILT * (1.0 - altitude_blend)
         )
-        if horizontal_corridor_mode and math.hypot(ax, az) > 0.01:
+        if (
+            horizontal_corridor_mode
+            and math.hypot(ax, az) > 0.01
+            and sensed_h > 500.0
+        ):
             # Reserve enough vertical thrust component to realise the allowed
-            # tilt.  This mirrors the online 75%-thrust vector coupling; the
-            # measured ship placement prevents it from becoming a low-altitude
-            # kilometre-scale translation/hover.
+            # tilt during the main translation.  Below 500 m the online loop
+            # instead clips lateral acceleration against the existing vertical
+            # command so a small correction cannot cause an upward hop.
             required_vertical_for_tilt = math.hypot(ax, az) / max(
                 math.tan(tilt_limit), 0.01
             )
@@ -586,9 +590,13 @@ def run(case: Case) -> Result:
             waypoint_vertical_speed = vv
             waypoint_lateral_speed = math.hypot(vx, vz)
             waypoint_error = current_error
-        if current_error <= 5.0:
+        # Match the flight verifier: once the stage enters the 10 m centre
+        # neighbourhood anywhere below 5 km, a later excursion is rebound.
+        # Starting this audit above the 2 km waypoint catches a fast centre
+        # crossing that would otherwise look acceptable only after returning.
+        if h <= 5000.0 and current_error <= 10.0:
             entered_center = True
-        elif entered_center:
+        elif h <= 5000.0 and entered_center:
             rebound_after_center = max(rebound_after_center, current_error)
 
         if h < 150.0 and h > WIRE_HOLD_HEIGHT and abs(vv) < 0.3:

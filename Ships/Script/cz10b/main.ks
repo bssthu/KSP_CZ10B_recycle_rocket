@@ -647,8 +647,11 @@ UNTIL HOOK_CAPTURED() {
             + V_VEL_KI * VERTICAL_INTEGRAL.
     }
     IF FINAL_ALIGN_MODE AND NOT FINAL_DESCENT_ARMED {
-        // Twelve seconds is a bounded settle, not a hover-until-perfect loop.
-        // After that window, continue downward slowly while alignment finishes.
+        // Alignment continues while descending.  A real-flight trace showed
+        // that even a bounded stationary settle could consume the remaining
+        // propellant a few metres above the cables.  FINAL_ALIGN_HOLD_SECONDS
+        // remains configurable for test articles, but the flight value is
+        // zero so the stage never trades its landing reserve for a hover.
         LOCAL FINAL_TARGET_V IS 0.
         // Low fuel must never be traded for a stationary final two-metre
         // correction. Keep aligning during a capture-envelope-safe descent.
@@ -684,9 +687,14 @@ UNTIL HOOK_CAPTURED() {
     // already riding its speed corridor, its standalone controller can ask
     // for only a few m/s^2 upward.  Using that small number directly in
     // a_h <= a_v*tan(tilt) reduced a requested 55 m/s^2 stop to about 5.4.
-    // Add the vertical component required to realise the allowed thrust angle;
-    // the 75% nominal cap above remains the hard main-braking limit.
-    IF H_CORRIDOR_MODE AND H_ACCEL:MAG > 0.01 {
+    // Add the vertical component required to realise the allowed thrust angle
+    // only while substantial translation remains.  Inside the last 500 m of
+    // height, raising vertical thrust to satisfy a lateral request can turn a
+    // small correction into an upward hop; there we cap lateral acceleration
+    // against the existing vertical command instead.  The 75% nominal cap
+    // above remains the hard main-braking limit.
+    IF H_CORRIDOR_MODE AND H_ACCEL:MAG > 0.01
+        AND HOOK_HEIGHT > 500 {
         LOCAL REQUIRED_VERTICAL_FOR_TILT IS H_ACCEL:MAG
             / MAX(TAN(TILT_LIMIT), 0.01).
         SET VERTICAL_THRUST_CMD TO MIN(MAX(VERTICAL_THRUST_CMD,

@@ -34,15 +34,15 @@ SET TERMINAL_HORIZONTAL_SPEED TO 0.5. // minimum speed used by the outer stoppin
 SET TERMINAL_HORIZONTAL_CORRIDOR_SPEED TO 150. // high-altitude cap; stop envelope tapers it to zero
 SET TERMINAL_HORIZONTAL_STOP_ACCEL TO 1.0. // conservative stop envelope absorbs the measured attitude lag
 SET TERMINAL_HORIZONTAL_DEADBAND TO 3.0. // the moving cradle handles the final few metres
-SET TERMINAL_ALIGN_RANGE TO 400.      // four extra seconds of damping before the strict 2 km gate
-SET TERMINAL_ALIGN_SPEED TO 12.0.     // fast enough to converge before the low-fuel crossing
-SET TERMINAL_ALIGN_POSITION_GAIN TO 0.10. // direct-path taper below the frame
-SET TERMINAL_ALIGN_VELOCITY_GAIN TO 0.65. // stronger final damping before crossing
-// Final capture is two-stage.  Settle above the cable plane first, then latch
-// a vertical-only descent so attitude lag cannot create another lateral pass.
-SET FINAL_ALIGN_HEIGHT TO 45.
+SET TERMINAL_ALIGN_RANGE TO 300.      // keep the range-indexed stop corridor active until the final approach
+SET TERMINAL_ALIGN_SPEED TO 30.0.     // cover the far half before the 2 km gate; position field then tapers for braking
+SET TERMINAL_ALIGN_POSITION_GAIN TO 0.15. // retain inward travel until the 2 km position gate, then taper before centre
+SET TERMINAL_ALIGN_VELOCITY_GAIN TO 2.00. // measured long-stage lag needs decisive damping before crossing
+// Final capture is two-stage.  Align while descending, then latch a
+// vertical-only descent so attitude lag cannot create another lateral pass.
+SET FINAL_ALIGN_HEIGHT TO 65.         // latch before the low-speed vertical loop can hover just above the old gate
 SET FINAL_ALIGN_RANGE TO 100.
-SET FINAL_ALIGN_HOLD_SECONDS TO 12.
+SET FINAL_ALIGN_HOLD_SECONDS TO 0.    // alignment continues during descent; do not spend the landing reserve hovering
 SET FINAL_ALIGN_SPEED TO 3.0.
 SET FINAL_ALIGN_POSITION_GAIN TO 0.05.
 SET FINAL_ALIGN_VELOCITY_GAIN TO 0.40.
@@ -96,9 +96,9 @@ SET TERMINAL_PLAN_POSITION_GAIN TO 0.10.
 SET TERMINAL_PLAN_VELOCITY_GAIN TO 1.50.
 SET TERMINAL_PLAN_STOP_ACCEL TO 3.0. // lag-aware no-overshoot velocity envelope
 // With little propellant left, keep moving through the frame rather than hover.
-SET TERMINAL_LOW_FUEL_FRACTION TO 0.01. // begin the decisive crossing before the last one percent is spent hovering
+SET TERMINAL_LOW_FUEL_FRACTION TO 0.02. // begin the decisive crossing before the last two percent is spent hovering
 SET TERMINAL_LOW_FUEL_DESCENT_SCALE TO 1.28.
-SET TERMINAL_LOW_FUEL_CAPTURE_SPEED TO 2.5. // cross within the 7.5 m/s net envelope before hovering dry
+SET TERMINAL_LOW_FUEL_CAPTURE_SPEED TO 4.0. // cross decisively inside the 7.5 m/s capture envelope before fuel depletion
 SET TERMINAL_DESCENT_MAX_SPEED TO 700.
 SET MIDCOURSE_START_HEIGHT TO 30000.
 SET MIDCOURSE_END_MARGIN TO 600.
