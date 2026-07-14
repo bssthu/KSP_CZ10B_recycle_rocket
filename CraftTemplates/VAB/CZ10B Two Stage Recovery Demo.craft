@@ -1,6 +1,6 @@
 ship = CZ10B Two Stage Recovery Demo
 version = 1.12.5
-description = Reusable first stage with exposed engine, stock TD-25 interstage, integrated upper stage and a Protective Rocket Nose Cone Mk7.
+description = Reusable first stage with a separate stock Mainsail, stock TD-25 interstage, integrated upper stage and a Protective Rocket Nose Cone Mk7.
 type = VAB
 size = 3,17,3
 steamPublishedFileId = 0
@@ -38,7 +38,39 @@ PART
 	modMass = 0
 	modSize = 0,0,0
 	link = Decoupler.2_2026071202
+	link = liquidEngineMainsail.v2_2026071204
+	attN = bottom,liquidEngineMainsail.v2_2026071204_0|0|-3.73|0
 	attN = top,Decoupler.2_2026071202_0|3.73|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = liquidEngineMainsail.v2_2026071204
+	partName = Part
+	persistentId = 2026071204
+	pos = 0,5.25641,0
+	attPos = 0,-4.74359,0
+	attPos0 = 0,5.25641,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Heaviest
+	rigidAttachment = False
+	istg = 1
+	resPri = 0
+	dstg = 0
+	sidx = 0
+	sqor = 1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	attN = top,CZ10B-DemoBooster_2026071201_0|0|1.01359|0
 	EVENTS { }
 	ACTIONS { }
 	PARTDATA { }

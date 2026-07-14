@@ -39,6 +39,18 @@ FUNCTION BOOSTER_PROPELLANT_FRACTION {
     RETURN AMOUNT / CAPACITY.
 }
 
+FUNCTION BOOSTER_HOOK_OFFSET_ALONG_UP {
+    PARAMETER UP_VEC.
+    LOCAL BOOSTERS IS SHIP:PARTSNAMED("CZ10B-DemoBooster").
+    IF BOOSTERS:LENGTH = 0 { RETURN HOOK_ABOVE_COM. }
+    // The full mission now carries a physically separate 6 t stock engine, so
+    // the vessel CoM moves as propellant is consumed. Measure the hook relative
+    // to the live CoM instead of assuming the tank origin remains the CoM.
+    LOCAL HOOK_FROM_COM IS BOOSTERS[0]:POSITION - SHIP:POSITION
+        + SHIP:FACING:FOREVECTOR * BOOSTER_HOOK_LOCAL_Y.
+    RETURN VDOT(HOOK_FROM_COM, UP_VEC) - NET_PLANE_OFFSET.
+}
+
 FUNCTION FIND_RECOVERY_SHIP {
     PARAMETER WANTED_NAME.
     LOCAL FOUND IS 0.

@@ -1,6 +1,6 @@
 ship = CZ10B Full Mission Recovery Test
 version = 1.12.5
-description = Full sea-recovery demonstrator with TT18-A hold-downs, exposed first-stage engine, Mk7 upper-stage nose cone and a tall moving-cable recovery ship.
+description = Full sea-recovery demonstrator with grounded TT18-A hold-downs, a separate stock Mainsail, Mk7 upper-stage nose cone and a tall moving-cable recovery ship.
 type = VAB
 size = 36,50,30
 steamPublishedFileId = 0
@@ -68,9 +68,41 @@ PART
 	modCost = 0
 	modMass = 0
 	modSize = 0,0,0
-	link = CZ10B-DemoBooster_2026071503
+	link = liquidEngineMainsail.v2_2026071509
 	attN = bottom,CZ10B-RecoveryPlatform_2026071501_0|0|0
-	attN = top,CZ10B-DemoBooster_2026071503_0|18|-9|0
+	attN = top,liquidEngineMainsail.v2_2026071509_0|18|-9.49064|0
+	EVENTS { }
+	ACTIONS { }
+	PARTDATA { }
+}
+PART
+{
+	part = liquidEngineMainsail.v2_2026071509
+	partName = Part
+	persistentId = 2026071509
+	pos = 0,2.54641,0
+	attPos = 18,-7.53359,0
+	attPos0 = 0,2.54641,0
+	rot = 0,0,0,1
+	attRot = 0,0,0,1
+	attRot0 = 0,0,0,1
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Heaviest
+	rigidAttachment = False
+	istg = 1
+	resPri = 0
+	dstg = 0
+	sidx = 0
+	sqor = 1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = CZ10B-DemoBooster_2026071503
+	attN = bottom,CZ10B-MissionLaunchRail_2026071502_0|0|-1.95705|0
+	attN = top,CZ10B-DemoBooster_2026071503_0|0|1.01359|0
 	EVENTS { }
 	ACTIONS { }
 	PARTDATA { }
@@ -81,7 +113,7 @@ PART
 	partName = Part
 	persistentId = 2026071503
 	pos = 0,7.29,0
-	attPos = 18,-2.79,0
+	attPos = 0,4.74359,0
 	attPos0 = 0,7.29,0
 	rot = 0,0,0,1
 	attRot = 0,0,0,1
@@ -103,7 +135,7 @@ PART
 	link = Decoupler.2_2026071504
 	link = launchClamp1_2026071507
 	link = launchClamp1_2026071508
-	attN = bottom,CZ10B-MissionLaunchRail_2026071502_0|-6.21|0
+	attN = bottom,liquidEngineMainsail.v2_2026071509_0|0|-3.73|0
 	attN = top,Decoupler.2_2026071504_0|3.73|0
 	EVENTS { }
 	ACTIONS { }
@@ -176,9 +208,9 @@ PART
 	part = launchClamp1_2026071507
 	partName = Part
 	persistentId = 2026071507
-	pos = -2.1,2.94,0
+	pos = -2.1,1.82,0
 	attPos = 0,0,0
-	attPos0 = -2.1,2.94,0
+	attPos0 = -2.1,1.82,0
 	rot = 0,0.7071068,0,0.7071068
 	attRot = 0,0,0,1
 	attRot0 = 0,0.7071068,0,0.7071068
@@ -208,9 +240,9 @@ PART
 	part = launchClamp1_2026071508
 	partName = Part
 	persistentId = 2026071508
-	pos = 2.1,2.94,0
+	pos = 2.1,1.82,0
 	attPos = 0,0,0
-	attPos0 = 2.1,2.94,0
+	attPos0 = 2.1,1.82,0
 	rot = 0,0.7071068,0,-0.7071068
 	attRot = 0,0,0,1
 	attRot0 = 0,0.7071068,0,-0.7071068

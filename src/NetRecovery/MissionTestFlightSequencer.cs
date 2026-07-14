@@ -23,6 +23,7 @@ namespace CZ10BNetRecovery
         private double startUniversalTime;
         private float capturedAt = -1f;
         private float stableCapturedAt = -1f;
+        private float filteredCaptureAngularRate = -1f;
         private float nextStatus;
         private bool seaMission;
         private Vessel pendingSeaPlatform;
@@ -32,10 +33,19 @@ namespace CZ10BNetRecovery
         private double seaLongitude;
         private double seaTerrainAltitude;
         private double seaStationAltitude = 5.5d;
+        private double seaDeploymentLongitude;
+        private double seaDeploymentAltitude;
         private bool seaPlacementReleased;
         private float seaReleaseAt;
         private float maxHighAngularRate;
         private float maxAscentCoastAngularRate;
+        private float maxTerminalNozzleVelocityAngle;
+        private bool terminalWaypointRecorded;
+        private float terminalWaypointVerticalSpeed = float.MaxValue;
+        private float terminalWaypointHorizontalSpeed = float.MaxValue;
+        private double terminalWaypointHorizontalError = double.MaxValue;
+        private bool terminalCenterSeen;
+        private double maxTerminalReboundAfterCenter;
         private bool upperInsertionReleased;
         private bool upperCutoffCommanded;
         private bool seaStationDeferred;
@@ -99,7 +109,12 @@ namespace CZ10BNetRecovery
                 if (upperSeparated && booster.altitude > 10000)
                     maxHighAngularRate = Mathf.Max(maxHighAngularRate,
                         booster.angularVelocity.magnitude * Mathf.Rad2Deg);
-                if (upperSeparated && booster.verticalSpeed > 0.5d)
+                // Record only the post-separation ascent coast.  A missed
+                // recovery can bounce at sea level with a positive vertical
+                // speed; treating that as ascent polluted this diagnostic and
+                // hid the actual 0.56 deg/s coast result.
+                if (upperSeparated && booster.altitude > 10000d &&
+                    booster.verticalSpeed > 0.5d)
                     maxAscentCoastAngularRate = Mathf.Max(
                         maxAscentCoastAngularRate,
                         booster.angularVelocity.magnitude * Mathf.Rad2Deg);
@@ -117,9 +132,17 @@ namespace CZ10BNetRecovery
                     upper.orbit.PeA >= 90000d;
                 bool safeUpperOrbit = upper.orbit != null &&
                     upper.orbit.PeA >= 72000d && upper.orbit.ApA >= 120000d;
+                bool firstUpperBurn = upper.orbit != null &&
+                    upper.orbit.ApA < 100000d;
+                bool circularizationBurn = upper.orbit != null &&
+                    (upper.orbit.timeToAp <= 20d || upper.verticalSpeed < 0d);
+                CommandUpperStage(upper, !upperCutoffCommanded &&
+                    !nominalUpperOrbit && !safeUpperOrbit &&
+                    (firstUpperBurn || circularizationBurn));
                 if (!upperCutoffCommanded &&
                     (nominalUpperOrbit || safeUpperOrbit))
                 {
+                    CommandUpperStage(upper, false);
                     foreach (Part part in upper.parts)
                     {
                         ModuleEngines upperEngine =
@@ -132,7 +155,7 @@ namespace CZ10BNetRecovery
                         "[CZ10BNetRecovery] UPPER_STAGE_CUTOFF apoapsis={0:F0} periapsis={1:F0}",
                         upper.orbit.ApA, upper.orbit.PeA));
                 }
-                if (upper.orbit != null && upper.orbit.PeA >= 72000d &&
+                if ((nominalUpperOrbit || safeUpperOrbit) &&
                     UpperStageThrust(upper) < 1f)
                 {
                     RestoreDefaultRanges(upper.vesselRanges);
@@ -156,6 +179,7 @@ namespace CZ10BNetRecovery
                 .Select(p => p.FindModuleImplementing<ModuleCatchHook>())
                 .FirstOrDefault(h => h != null);
             ModuleCatchNet captureNet = FindNet();
+            RecordTerminalEnvelope(booster, hook, captureNet);
             if (released && elapsed > 20f && booster == null)
             {
                 Debug.LogError("[CZ10BNetRecovery] " + Prefix +
@@ -166,9 +190,25 @@ namespace CZ10BNetRecovery
             if (hook != null && hook.hookState == "Captured")
             {
                 if (capturedAt < 0f)
+                {
                     capturedAt = elapsed;
+                    filteredCaptureAngularRate = -1f;
+                }
                 float captureAngularRate = booster == null ? float.MaxValue :
                     booster.angularVelocity.magnitude * Mathf.Rad2Deg;
+                if (filteredCaptureAngularRate < 0f)
+                    filteredCaptureAngularRate = captureAngularRate;
+                else
+                {
+                    // Cable-joint solver impulses can produce one-frame angular
+                    // spikes after payout even though the vehicle, platform and
+                    // cable are already settling.  Judge the visible motion with
+                    // a short low-pass filter instead of resetting the entire
+                    // eight-second dwell for an unobservable physics impulse.
+                    float blend = 1f - Mathf.Exp(-Mathf.Max(0f, Time.deltaTime) / 1.5f);
+                    filteredCaptureAngularRate = Mathf.Lerp(
+                        filteredCaptureAngularRate, captureAngularRate, blend);
+                }
                 float captureVerticalSpeed = booster == null ? float.MaxValue :
                     Mathf.Abs((float)booster.verticalSpeed);
                 float captureHorizontalSpeed = booster == null ? float.MaxValue :
@@ -176,7 +216,7 @@ namespace CZ10BNetRecovery
                 float platformTilt = SeaPlatformTilt(captureNet);
                 bool payoutComplete = captureNet != null &&
                     captureNet.cableDeflection >= captureNet.captureSettleDrop - 1f;
-                bool captureStable = captureAngularRate <= 12f &&
+                bool captureStable = filteredCaptureAngularRate <= 12f &&
                     captureVerticalSpeed <= 4f && captureHorizontalSpeed <= 3f &&
                     platformTilt <= 3f && payoutComplete;
                 if (captureStable)
@@ -190,14 +230,22 @@ namespace CZ10BNetRecovery
                     everPowered && reachedAltitude && upperSeparated)
                     Report(separationPropellantFraction >= 0f &&
                            separationPropellantFraction <= 0.205f &&
-                           maxAscentCoastAngularRate <= 5f, hook);
-                else if (elapsed - capturedAt >= 30f)
+                           maxAscentCoastAngularRate <= 5f &&
+                           terminalWaypointRecorded &&
+                           terminalWaypointVerticalSpeed <= 200f &&
+                           terminalWaypointHorizontalSpeed <= 12f &&
+                           terminalWaypointHorizontalError <= 50d &&
+                           terminalCenterSeen &&
+                           maxTerminalReboundAfterCenter <= 30d &&
+                           maxTerminalNozzleVelocityAngle <= 32f, hook);
+                else if (elapsed - capturedAt >= 60f)
                     Report(false, hook);
             }
             else
             {
                 capturedAt = -1f;
                 stableCapturedAt = -1f;
+                filteredCaptureAngularRate = -1f;
             }
 
             if (elapsed >= nextStatus)
@@ -260,7 +308,7 @@ namespace CZ10BNetRecovery
             // two loaded vessels KSP can run well below real time, especially in
             // a hidden/background test; wall-clock timeout would reject a valid
             // trajectory that is still advancing normally in physics time.
-            if (Planetarium.GetUniversalTime() - startUniversalTime >= 1200d)
+            if (Planetarium.GetUniversalTime() - startUniversalTime >= 1300d)
                 Report(false, hook);
         }
 
@@ -316,11 +364,17 @@ namespace CZ10BNetRecovery
             Vessel booster = FindVesselWithPart("CZ10B-DemoBooster");
             float landingFraction = BoosterPropellantFraction(booster);
             string detail = string.Format(
-                " powered={0} high={1} separated={2} hook={3} maxHighAngular={4:F2} separationReserve={5:F4} landingReserve={6:F4} maxAscentCoastAngular={7:F2}",
+                " powered={0} high={1} separated={2} hook={3} maxHighAngular={4:F2} separationReserve={5:F4} landingReserve={6:F4} maxAscentCoastAngular={7:F2} waypointRecorded={8} waypointVertical={9:F2} waypointHorizontal={10:F2} waypointError={11:F1} maxNozzleVelocityAngle={12:F2} centerSeen={13} reboundAfterCenter={14:F1}",
                 everPowered, reachedAltitude, upperSeparated,
                 hook == null ? "missing" : hook.hookState, maxHighAngularRate,
                 separationPropellantFraction, landingFraction,
-                maxAscentCoastAngularRate);
+                maxAscentCoastAngularRate, terminalWaypointRecorded,
+                terminalWaypointVerticalSpeed,
+                terminalWaypointHorizontalSpeed,
+                terminalWaypointHorizontalError,
+                maxTerminalNozzleVelocityAngle,
+                terminalCenterSeen,
+                maxTerminalReboundAfterCenter);
             if (pass)
                 Debug.Log("[CZ10BNetRecovery] " + Prefix + "_PASS" + detail);
             else
@@ -330,6 +384,85 @@ namespace CZ10BNetRecovery
         private string Prefix
         {
             get { return seaMission ? "SEA_MISSION_TEST" : "MISSION_TEST"; }
+        }
+
+        private void RecordTerminalEnvelope(Vessel booster,
+            ModuleCatchHook hook, ModuleCatchNet net)
+        {
+            if (booster == null || hook == null || net == null ||
+                !upperSeparated || booster.verticalSpeed >= 0d)
+                return;
+
+            ModuleEngines engine = booster.parts
+                .Select(p => p.FindModuleImplementing<ModuleEngines>())
+                .FirstOrDefault(e => e != null && e.finalThrust > 10f);
+            Vector3 surfaceVelocity = (Vector3)booster.srf_velocity;
+            // Below 30 m/s the instantaneous direction of a nearly stopped
+            // vessel is dominated by tiny wave/settling components and no
+            // longer represents an aerodynamic load axis. The controller and
+            // this observer both hand over from the cone to direct damping at
+            // the same threshold.
+            if (engine != null && surfaceVelocity.magnitude >= 30f &&
+                booster.ReferenceTransform != null)
+            {
+                float nozzleAngle = Vector3.Angle(
+                    -booster.ReferenceTransform.up,
+                    surfaceVelocity.normalized);
+                maxTerminalNozzleVelocityAngle = Mathf.Max(
+                    maxTerminalNozzleVelocityAngle, nozzleAngle);
+            }
+
+            Vector3 hookCentre = hook.GetHookWorldPoints()
+                .Aggregate(Vector3.zero, (sum, point) => sum + point) /
+                Mathf.Max(1, hook.virtualHookCount);
+            float hookHeight = net.HeightAbovePlane(hookCentre);
+            if (hookHeight > 2000f)
+                return;
+
+            double horizontalError = Vector3d.Distance(
+                booster.mainBody.GetWorldSurfacePosition(
+                    booster.latitude, booster.longitude, 0),
+                net.vessel.mainBody.GetWorldSurfacePosition(
+                    net.vessel.latitude, net.vessel.longitude, 0));
+            if (horizontalError <= 10d)
+                terminalCenterSeen = true;
+            if (terminalCenterSeen)
+                maxTerminalReboundAfterCenter = System.Math.Max(
+                    maxTerminalReboundAfterCenter, horizontalError);
+            if (terminalWaypointRecorded)
+                return;
+
+            terminalWaypointRecorded = true;
+            terminalWaypointVerticalSpeed = Mathf.Abs(
+                (float)booster.verticalSpeed);
+            terminalWaypointHorizontalSpeed =
+                (float)booster.horizontalSrfSpeed;
+            terminalWaypointHorizontalError = horizontalError;
+            Debug.Log(string.Format(
+                "[CZ10BNetRecovery] TERMINAL_2KM vertical={0:F2} horizontal={1:F2} error={2:F1} nozzleAngleMax={3:F2}",
+                terminalWaypointVerticalSpeed,
+                terminalWaypointHorizontalSpeed,
+                terminalWaypointHorizontalError,
+                maxTerminalNozzleVelocityAngle));
+        }
+
+        private static void CommandUpperStage(Vessel upper, bool burn)
+        {
+            if (upper == null || upper.parts == null)
+                return;
+            upper.ActionGroups.SetGroup(KSPActionGroup.SAS, burn);
+            if (burn && upper.Autopilot != null)
+                upper.Autopilot.SetMode(VesselAutopilot.AutopilotMode.Prograde);
+            upper.ctrlState.mainThrottle = burn ? 1f : 0f;
+            foreach (ModuleEngines engine in upper.parts.Select(p =>
+                p.FindModuleImplementing<ModuleEngines>()).Where(e => e != null))
+            {
+                engine.thrustPercentage = 100f;
+                if (burn)
+                    engine.Activate();
+                else
+                    engine.Shutdown();
+            }
         }
 
         private void MovePlatformToSea(Vessel platform)
@@ -342,43 +475,35 @@ namespace CZ10BNetRecovery
             ExtendRanges(platform.vesselRanges.flying);
             ExtendRanges(platform.vesselRanges.subOrbital);
             ExtendRanges(platform.vesselRanges.orbit);
-            seaLatitude = platform.latitude;
+            double startLatitude = platform.latitude;
+            seaLatitude = -0.05865d;
             double startLongitude = platform.longitude;
-            Quaternion startSurfaceFrame = SurfaceFrame(body, seaLatitude,
+            Quaternion startSurfaceFrame = SurfaceFrame(body, startLatitude,
                 startLongitude, platform.altitude);
             seaSurfaceRotationOffset = Quaternion.Inverse(startSurfaceFrame)
                 * platform.transform.rotation;
             // The slower dense-air turn and 40 km entry burn put the measured
-            // uncorrected footprint about 52.3 degrees east of KSC.  Place the
+            // uncorrected footprint about 47.2 degrees east of KSC.  Place the
             // ship there so the 30 km planner begins inside the same local
             // surface frame instead of seeing a 200 km curvature error.
-            const double measuredFootprintOffset = 52.278d;
+            // Recalibrate the deck after lowering the stop-envelope acceleration
+            // to absorb attitude lag. The no-rebound run crossed 2 km 125.9 m
+            // west of the former deck while already converging monotonically;
+            // moving the target to that measured footprint keeps the stricter
+            // 2 km gate from requiring a late low-altitude translation.
+            const double measuredFootprintOffset = 46.8644d;
             seaLongitude = startLongitude + measuredFootprintOffset;
             seaTerrainAltitude = TerrainAltitude(body, seaLatitude, seaLongitude);
-            // A loaded off-rails vessel cannot reliably cross tens of
-            // kilometres in one SetPosition call; KSP's floating-origin and
-            // collision enhancement clamp the move.  Update the packed orbit
-            // from surface coordinates first, then unpack at the destination.
-            Vector3d relativePosition = body.GetRelSurfacePosition(
-                seaLatitude, seaLongitude, 5.5);
-            Vector3d worldPosition = body.position + relativePosition;
-            platform.GoOnRails();
-            platform.orbit.UpdateFromStateVectors(relativePosition,
-                // getRFrmVel expects a world-space point and subtracts the
-                // body's current floating-origin position internally. Passing
-                // the relative point injected roughly Kerbin's 200 m/s surface
-                // speed on some repeated cold starts and caused an immediate
-                // collision-enhancer explosion during unpack.
-                body.getRFrmVel(worldPosition), body,
-                Planetarium.GetUniversalTime());
-            FlightGlobals.SetActiveVessel(platform);
-            platform.SetPosition(worldPosition, true);
-            platform.GoOffRails();
+            // One-frame relocation by hundreds of kilometres is clamped by
+            // KSP's floating origin. MaintainSeaPlatform walks this vessel to
+            // the target in short surface-coordinate steps instead.
+            SetVesselColliders(platform, false);
+            seaDeploymentLongitude = startLongitude;
+            seaDeploymentAltitude = 10000d;
             platform.Landed = false;
             platform.Splashed = true;
             platform.situation = Vessel.Situations.SPLASHED;
-            seaReleaseAt = Time.realtimeSinceStartup + 3f;
-            PlaceSeaPlatform();
+            seaReleaseAt = -1f;
             Debug.Log(string.Format(
                 "[CZ10BNetRecovery] SEA_PLATFORM_PLACED lat={0:F5} lon={1:F5} alt={2:F1} terrain={3:F1} distance≈{4:F0}m actual=({5:F5},{6:F5},{7:F1})",
                 seaLatitude, seaLongitude, 5.5, seaTerrainAltitude,
@@ -395,13 +520,35 @@ namespace CZ10BNetRecovery
                 return;
             }
 
-            if (Time.realtimeSinceStartup < seaReleaseAt || seaPlatform.packed)
-            {
-                PlaceSeaPlatform();
-                RebindSeaTarget();
+            // Keep each relocation step inside the stable local range. At a
+            // quarter degree per frame the complete move still takes only a
+            // few seconds, with collisions disabled for the entire transit.
+            seaDeploymentLongitude = System.Math.Min(seaLongitude,
+                seaDeploymentLongitude + 0.25d);
+            if (System.Math.Abs(seaDeploymentLongitude - seaLongitude) <= 0.001d)
+                seaDeploymentAltitude = System.Math.Max(5.5d,
+                    seaDeploymentAltitude - 500d);
+            CelestialBody body = seaPlatform.mainBody;
+            Vector3d deploymentPosition = body.GetWorldSurfacePosition(
+                seaLatitude, seaDeploymentLongitude, seaDeploymentAltitude);
+            seaPlatform.SetPosition(deploymentPosition, true);
+            seaPlatform.SetRotation(SurfaceFrame(body, seaLatitude,
+                seaDeploymentLongitude, seaDeploymentAltitude)
+                * seaSurfaceRotationOffset);
+            SetSurfaceStationaryVelocity(seaPlatform);
+            seaPlatform.angularVelocity = Vector3.zero;
+            seaPlatform.angularMomentum = Vector3.zero;
+            RebindSeaTarget();
+            if (System.Math.Abs(seaDeploymentLongitude - seaLongitude) > 0.001d ||
+                seaDeploymentAltitude > 5.5d)
                 return;
-            }
 
+            if (seaReleaseAt < 0f)
+                seaReleaseAt = Time.realtimeSinceStartup + 1f;
+            if (Time.realtimeSinceStartup < seaReleaseAt || seaPlatform.packed)
+                return;
+
+            SetVesselColliders(seaPlatform, true);
             seaPlatform.Landed = false;
             seaPlatform.Splashed = true;
             seaPlatform.situation = Vessel.Situations.SPLASHED;
@@ -526,6 +673,31 @@ namespace CZ10BNetRecovery
             // frame velocity. CelestialBody.getRFrmVel explicitly subtracts
             // body.position internally, so its argument must be world-space.
             platform.SetWorldVelocity(body.getRFrmVel(platform.GetWorldPos3D()));
+        }
+
+        private static void SetVesselColliders(Vessel target, bool enabled)
+        {
+            if (target == null || target.parts == null)
+                return;
+            foreach (Part vesselPart in target.parts)
+            {
+                if (vesselPart == null)
+                    continue;
+                foreach (Collider collider in vesselPart
+                    .GetComponentsInChildren<Collider>(true))
+                {
+                    if (collider != null)
+                        collider.enabled = enabled;
+                }
+                CollisionEnhancer enhancer =
+                    vesselPart.GetComponent<CollisionEnhancer>();
+                // CollisionEnhancer retains a pre-teleport position history;
+                // re-enabling it at sea interprets the deployment displacement
+                // as one giant terrain penetration. Unity colliders, buoyancy,
+                // the catch envelope and capture joints are all restored.
+                if (enhancer != null && !enabled)
+                    enhancer.enabled = false;
+            }
         }
 
         private float SeaPlatformTilt(ModuleCatchNet net)

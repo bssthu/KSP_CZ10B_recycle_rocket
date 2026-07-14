@@ -34,6 +34,7 @@ namespace CZ10BNetRecovery
         [KSPField] public float cableAnchorHalfWidth = -1f;
         [KSPField] public float cableAnchorHalfLength = -1f;
         [KSPField] public float closureHeight = 16f;
+        [KSPField] public float finalClosureHeight = 1f;
         [KSPField] public float closureHalfWidth = 8f;
         [KSPField] public bool debugLogging = false;
 
@@ -82,6 +83,12 @@ namespace CZ10BNetRecovery
         private double lastDebug;
         private float currentCableInset;
         private Vector2 currentCableCentre;
+        // Once a descending stage enters the guarded volume, keep that target
+        // until capture (or until it has passed below the complete cable sweep).
+        // Reacquiring every scan made the lines reopen when a late lateral
+        // correction briefly carried the hook centroid outside the initial
+        // acquisition box.
+        private Guid trackedCandidateId = Guid.Empty;
 
         [KSPEvent(guiActive = true, guiName = "Release captured stage", active = true)]
         public void ReleaseCapturedStage()
@@ -101,6 +108,7 @@ namespace CZ10BNetRecovery
             RestoreCaptureCollisions();
             currentCableInset = openCableInset;
             currentCableCentre = Vector2.zero;
+            trackedCandidateId = Guid.Empty;
             cableTrackingError = 0f;
             cableDeflection = 0f;
             netState = armed ? "Open" : "Safe";
@@ -114,6 +122,7 @@ namespace CZ10BNetRecovery
             base.OnStart(state);
             currentCableInset = openCableInset;
             currentCableCentre = Vector2.zero;
+            trackedCandidateId = Guid.Empty;
             if (HighLogic.LoadedSceneIsFlight || HighLogic.LoadedSceneIsEditor)
             {
                 CreateCableVisuals();
@@ -536,24 +545,46 @@ namespace CZ10BNetRecovery
             {
                 currentCableInset = closedCableInset;
                 Vector2 capturedCentre;
-                if (TryGetCableTarget(true, out capturedCentre))
+                float capturedHeight;
+                if (TryGetCableTarget(true, out capturedCentre,
+                    out capturedHeight))
                     MoveCableCentre(capturedCentre);
                 UpdateCableVisuals();
                 return;
             }
 
             Vector2 requestedCentre = Vector2.zero;
-            bool requested = armed && TryGetCableTarget(false, out requestedCentre);
-            float targetInset = requested ? closedCableInset : openCableInset;
-            currentCableInset = Mathf.MoveTowards(currentCableInset, targetInset,
-                cableClosureSpeed * 0.05f);
+            float requestedHeight = float.MaxValue;
+            bool requested = armed && TryGetCableTarget(false,
+                out requestedCentre, out requestedHeight);
+            if (requested)
+            {
+                // Aperture is a direct linear function of hook height. It is
+                // fully open at closureHeight and reaches its final size only
+                // finalClosureHeight metres above the capture plane. This
+                // removes the old timer-driven snap closure.
+                float closureTravel = Mathf.Max(0.01f,
+                    closureHeight - finalClosureHeight);
+                float closureFraction = Mathf.Clamp01(
+                    (closureHeight - requestedHeight) / closureTravel);
+                currentCableInset = Mathf.Lerp(openCableInset,
+                    closedCableInset, closureFraction);
+            }
+            else
+            {
+                // Keep cableClosureSpeed as the safe reopening rate if a
+                // candidate leaves the guarded volume before capture.
+                currentCableInset = Mathf.MoveTowards(currentCableInset,
+                    openCableInset, cableClosureSpeed * 0.05f);
+            }
             MoveCableCentre(requested ? requestedCentre : Vector2.zero);
 
             if (!armed)
                 netState = "Safe";
             else if (!requested)
                 netState = "Open";
-            else if (Math.Abs(currentCableInset - closedCableInset) <= 0.05f &&
+            else if (requestedHeight <= finalClosureHeight &&
+                     Math.Abs(currentCableInset - closedCableInset) <= 0.05f &&
                      Vector2.Distance(currentCableCentre, requestedCentre) <= 0.5f)
                 netState = "Closed";
             else if (Math.Abs(currentCableInset - closedCableInset) <= 0.05f)
@@ -563,16 +594,29 @@ namespace CZ10BNetRecovery
             UpdateCableVisuals();
         }
 
-        private bool TryGetCableTarget(bool capturedOnly, out Vector2 target)
+        private bool TryGetCableTarget(bool capturedOnly, out Vector2 target,
+            out float targetHeight)
         {
             target = Vector2.zero;
+            targetHeight = float.MaxValue;
             float bestDistance = float.MaxValue;
             bool found = false;
+            bool trackedCandidateSeen = false;
+            Guid bestCandidateId = Guid.Empty;
             foreach (Vessel candidate in FlightGlobals.VesselsLoaded)
             {
                 if (candidate == null || candidate == vessel || candidate.packed ||
                     candidate.parts == null || (capturedOnly && !captures.ContainsKey(candidate.id)))
                     continue;
+
+                bool isTrackedCandidate = !capturedOnly &&
+                    trackedCandidateId != Guid.Empty &&
+                    candidate.id == trackedCandidateId;
+                if (!capturedOnly && trackedCandidateId != Guid.Empty &&
+                    !isTrackedCandidate)
+                    continue;
+                if (isTrackedCandidate)
+                    trackedCandidateSeen = true;
 
                 List<Vector3> points = candidate.parts
                     .Select(p => p.FindModuleImplementing<ModuleCatchHook>())
@@ -593,14 +637,16 @@ namespace CZ10BNetRecovery
                         candidate.vesselName, centre.x, centre.y, centre.z,
                         height, closureHalfWidth, closureHeight));
                 }
-                // Once the lines are closed, retain the target through a modest
-                // transient sway instead of reopening the cradle at the worst
-                // possible moment. Initial acquisition keeps the tighter bounds.
+                // Initial acquisition uses the guarded box. After acquisition,
+                // height alone drives the aperture, so lateral sway cannot make
+                // the lines jump back open during the final approach.
                 float activeHalfWidth = closureHalfWidth;
                 if (currentCableInset <= closedCableInset + 0.15f)
                     activeHalfWidth += 5f;
-                if (Math.Abs(centre.x) <= activeHalfWidth &&
-                    Math.Abs(centre.z) <= activeHalfWidth &&
+                bool insideAcquisitionBox =
+                    Math.Abs(centre.x) <= activeHalfWidth &&
+                    Math.Abs(centre.z) <= activeHalfWidth;
+                if ((isTrackedCandidate || insideAcquisitionBox) &&
                     height >= -jointTravel - detectionDepth && height <= closureHeight)
                 {
                     float distance = Mathf.Abs(height);
@@ -608,9 +654,18 @@ namespace CZ10BNetRecovery
                     {
                         bestDistance = distance;
                         target = new Vector2(centre.x, centre.z);
+                        targetHeight = height;
+                        bestCandidateId = candidate.id;
                         found = true;
                     }
                 }
+            }
+            if (!capturedOnly)
+            {
+                if (found && trackedCandidateId == Guid.Empty)
+                    trackedCandidateId = bestCandidateId;
+                else if (trackedCandidateId != Guid.Empty && !trackedCandidateSeen)
+                    trackedCandidateId = Guid.Empty;
             }
             return found;
         }
@@ -763,6 +818,11 @@ namespace CZ10BNetRecovery
             Vector3 delta = worldPoint - part.transform.position;
             return new Vector3(Vector3.Dot(delta, right),
                 Vector3.Dot(delta, up), Vector3.Dot(delta, forward));
+        }
+
+        internal float HeightAbovePlane(Vector3 worldPoint)
+        {
+            return WorldToNet(worldPoint).y - planeOffset;
         }
 
         private Vector3 NetToWorld(Vector3 netPoint)
