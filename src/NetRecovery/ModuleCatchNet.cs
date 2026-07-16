@@ -27,6 +27,8 @@ namespace CZ10BNetRecovery
         [KSPField] public float captureSettleSpeed = 2.5f;
         [KSPField] public float captureLinearDamping = 3f;
         [KSPField] public float captureAngularDamping = 5f;
+        [KSPField] public float captureMaxLinearSlip = 4f;
+        [KSPField] public float captureMaxAngularSpeed = 6f;
         [KSPField] public float openCableInset = 8f;
         [KSPField] public float closedCableInset = 1.65f;
         [KSPField] public float cableClosureSpeed = 2.5f;
@@ -65,7 +67,11 @@ namespace CZ10BNetRecovery
             public Guid vesselId;
             public Vector3 currentWorld;
             public Vector3 settledWorld;
+            public Vector3 currentLocal;
+            public Vector3 settledLocal;
             public Vector3 commandedVelocity;
+            public bool controlsAttitude;
+            public Quaternion netRelativeRotation;
         }
 
         private readonly Dictionary<ConfigurableJoint, CaptureTether> captureTethers =
@@ -270,7 +276,10 @@ namespace CZ10BNetRecovery
         {
             List<ConfigurableJoint> joints = new List<ConfigurableJoint>();
             int expectedHookPoints = hooks.Sum(h => Mathf.Max(1, h.virtualHookCount));
-            int availableHookPoints = hooks.Sum(h => h.GetHookWorldPoints().Count(IsPointOverNet));
+            List<Vector3> availableHookWorldPoints = hooks
+                .SelectMany(h => h.GetHookWorldPoints())
+                .Where(IsPointOverNet).ToList();
+            int availableHookPoints = availableHookWorldPoints.Count;
             if (availableHookPoints < expectedHookPoints)
             {
                 netState = "Rejected: partial hooks";
@@ -279,6 +288,17 @@ namespace CZ10BNetRecovery
                     candidate.vesselName, availableHookPoints, expectedHookPoints));
                 return;
             }
+
+            // Preserve the four-hook footprint but translate its loaded
+            // equilibrium to the centre of the recovery frame.  Keeping each
+            // tether's original lateral coordinate left an otherwise stable
+            // edge capture oscillating 13.8 m from centre.  Moving all four
+            // winches by the same offset recentres the stage without applying
+            // a differential moment or changing its captured attitude.
+            Vector3 capturedCentreLocal = availableHookWorldPoints
+                .Select(WorldToNet)
+                .Aggregate(Vector3.zero, (sum, point) => sum + point) /
+                Mathf.Max(1, availableHookPoints);
 
             // Attach every armed hook over the net in one physics frame. Four spaced joints
             // reproduce the stabilising moment of the real four-hook arrangement.
@@ -297,6 +317,9 @@ namespace CZ10BNetRecovery
                     GameObject winchObject = new GameObject(
                         "CZ10B kinematic winch anchor");
                     winchObject.transform.position = hookWorld;
+                    bool controlsAttitude = joints.Count == 0;
+                    Quaternion capturedRotation = hook.part.Rigidbody.rotation;
+                    winchObject.transform.rotation = capturedRotation;
                     Rigidbody winchBody = winchObject.AddComponent<Rigidbody>();
                     winchBody.isKinematic = true;
                     winchBody.useGravity = false;
@@ -309,6 +332,8 @@ namespace CZ10BNetRecovery
                     // volume contact happened. A later edge capture therefore
                     // cannot add its detection depth to the intended rope sag.
                     Vector3 settledLocal = WorldToNet(hookWorld);
+                    settledLocal.x -= capturedCentreLocal.x;
+                    settledLocal.z -= capturedCentreLocal.z;
                     settledLocal.y = planeOffset - captureSettleDrop;
                     Vector3 settledWorld = NetToWorld(settledLocal);
                     // Start with zero geometric error. The winch then pays the
@@ -319,12 +344,24 @@ namespace CZ10BNetRecovery
                     joint.xMotion = ConfigurableJointMotion.Limited;
                     joint.yMotion = ConfigurableJointMotion.Limited;
                     joint.zMotion = ConfigurableJointMotion.Limited;
-                    // Four separated linear hook points already provide the
-                    // stabilising moment. Repeating angular constraints on all
-                    // four joints over-constrains a tilted full-size stage.
-                    joint.angularXMotion = ConfigurableJointMotion.Free;
-                    joint.angularYMotion = ConfigurableJointMotion.Free;
-                    joint.angularZMotion = ConfigurableJointMotion.Free;
+                    // Four separated linear points carry the vehicle weight.
+                    // One, and only one, line also represents the attitude
+                    // bridle. Leaving every angular axis free allowed a rare
+                    // multi-joint solver mode to spin the long empty stage
+                    // hundreds of degrees per second after an otherwise clean
+                    // capture; locking all four over-constrains a tilted stage.
+                    // The primary winch follows the live net frame below, so
+                    // this single lock preserves the captured attitude without
+                    // pinning it to Kerbin's inertial frame.
+                    joint.angularXMotion = controlsAttitude
+                        ? ConfigurableJointMotion.Locked
+                        : ConfigurableJointMotion.Free;
+                    joint.angularYMotion = controlsAttitude
+                        ? ConfigurableJointMotion.Locked
+                        : ConfigurableJointMotion.Free;
+                    joint.angularZMotion = controlsAttitude
+                        ? ConfigurableJointMotion.Locked
+                        : ConfigurableJointMotion.Free;
 
                     SoftJointLimit linearLimit = joint.linearLimit;
                     // jointTravel is the total cable sweep/sag envelope, not
@@ -358,7 +395,12 @@ namespace CZ10BNetRecovery
                         winchBody = winchBody,
                         vesselId = candidate.id,
                         currentWorld = hookWorld,
-                        settledWorld = settledWorld
+                        settledWorld = settledWorld,
+                        currentLocal = WorldToNet(hookWorld),
+                        settledLocal = settledLocal,
+                        controlsAttitude = controlsAttitude,
+                        netRelativeRotation = Quaternion.Inverse(NetRotation()) *
+                            capturedRotation
                     };
                 }
                 hook.SetCaptured(true);
@@ -439,17 +481,28 @@ namespace CZ10BNetRecovery
                     captureTethers.Remove(joint);
                     continue;
                 }
-                // Freeze the payout path in the capture-time world frame.
-                // Recomputing it from the DP-positioned platform every frame
-                // converted its sub-metre station corrections into periodic
-                // 100+ m/s kinematic-anchor impulses.
-                Vector3 commandedPosition = Vector3.MoveTowards(
-                    tether.currentWorld, tether.settledWorld,
+                // Keep the paid-out line fixed in the recovery ship's local net
+                // frame. A world-space endpoint is valid for only one instant:
+                // DP station keeping, Kerbin rotation and floating-origin shifts
+                // otherwise leave the captured stage tens of metres behind the
+                // rendered ropes. Use the live Rigidbody position as the prior
+                // world point so a floating-origin rebase is shared by both ends
+                // and cannot appear as an enormous winch velocity.
+                tether.currentLocal = Vector3.MoveTowards(
+                    tether.currentLocal, tether.settledLocal,
                     captureSettleSpeed * deltaTime);
+                Vector3 previousPosition = tether.winchBody.position;
+                Vector3 commandedPosition = NetToWorld(tether.currentLocal);
                 tether.commandedVelocity =
-                    (commandedPosition - tether.currentWorld) / deltaTime;
+                    (commandedPosition - previousPosition) / deltaTime;
                 tether.currentWorld = commandedPosition;
                 tether.winchBody.MovePosition(commandedPosition);
+                if (tether.controlsAttitude)
+                {
+                    Quaternion commandedRotation = NetRotation() *
+                        tether.netRelativeRotation;
+                    tether.winchBody.MoveRotation(commandedRotation);
+                }
             }
             return deltaTime;
         }
@@ -477,17 +530,35 @@ namespace CZ10BNetRecovery
                 Vector3 winchVelocity = stageTethers.Aggregate(Vector3.zero,
                     (sum, tether) => sum + tether.commandedVelocity) /
                     stageTethers.Count;
-                Vector3 stageVelocity = stage.rootPart.Rigidbody.velocity;
-                float linearBlend = 1f - Mathf.Exp(-captureLinearDamping * deltaTime);
-                Vector3 velocityCorrection =
-                    (winchVelocity - stageVelocity) * linearBlend;
+                float linearScale = Mathf.Exp(-captureLinearDamping * deltaTime);
                 float angularScale = Mathf.Exp(-captureAngularDamping * deltaTime);
+                float maximumAngularSpeed = Mathf.Max(0f,
+                    captureMaxAngularSpeed) * Mathf.Deg2Rad;
                 foreach (Part stagePart in stage.parts)
                 {
                     if (stagePart == null || stagePart.Rigidbody == null)
                         continue;
-                    stagePart.Rigidbody.velocity += velocityCorrection;
-                    stagePart.Rigidbody.angularVelocity *= angularScale;
+                    Rigidbody stageBody = stagePart.Rigidbody;
+                    // Damp each body relative to the moving winches, not just
+                    // the root body's common translation. A common correction
+                    // preserves the very rotational velocity that the active
+                    // winches are meant to absorb.
+                    Vector3 relativeVelocity =
+                        (stageBody.velocity - winchVelocity) * linearScale;
+                    float maximumSlip = Mathf.Max(0f, captureMaxLinearSlip);
+                    if (maximumSlip > 0f &&
+                        relativeVelocity.sqrMagnitude > maximumSlip * maximumSlip)
+                        relativeVelocity = relativeVelocity.normalized * maximumSlip;
+                    stageBody.velocity = winchVelocity + relativeVelocity;
+
+                    Vector3 angularVelocity =
+                        stageBody.angularVelocity * angularScale;
+                    if (maximumAngularSpeed > 0f &&
+                        angularVelocity.sqrMagnitude >
+                        maximumAngularSpeed * maximumAngularSpeed)
+                        angularVelocity = angularVelocity.normalized *
+                            maximumAngularSpeed;
+                    stageBody.angularVelocity = angularVelocity;
                 }
             }
         }
@@ -682,7 +753,12 @@ namespace CZ10BNetRecovery
                 Mathf.Clamp(requestedCentre.y, -limitZ, limitZ));
             currentCableCentre = Vector2.MoveTowards(currentCableCentre, bounded,
                 cableTrackingSpeed * 0.05f);
-            cableTrackingError = Vector2.Distance(currentCableCentre, bounded);
+            // Include travel saturation in the reported error. Comparing only
+            // with the already-clamped command displayed 0.00 m even when the
+            // hook centroid remained outside the short-axis cradle, concealing
+            // the exact condition that correctly blocks four-hook capture.
+            cableTrackingError = Vector2.Distance(
+                currentCableCentre, requestedCentre);
         }
 
         private bool HooksInsideTrackedCradle(List<ModuleCatchHook> hooks)
@@ -740,7 +816,7 @@ namespace CZ10BNetRecovery
                 // path visually and produced the feedback 7 -> 8 discontinuity.
                 List<Vector3> capturedPoints = captureTethers.Values
                     .Where(t => t != null && t.winchBody != null)
-                    .Select(t => t.currentWorld)
+                    .Select(t => t.winchBody.position)
                     .Select(WorldToNet)
                     .ToList();
                 if (capturedPoints.Count > 0)
@@ -809,6 +885,15 @@ namespace CZ10BNetRecovery
             forward = Vector3.Cross(right, up).normalized;
         }
 
+        private Quaternion NetRotation()
+        {
+            Vector3 right;
+            Vector3 up;
+            Vector3 forward;
+            NetAxes(out right, out up, out forward);
+            return Quaternion.LookRotation(forward, up);
+        }
+
         private Vector3 WorldToNet(Vector3 worldPoint)
         {
             Vector3 right;
@@ -823,6 +908,12 @@ namespace CZ10BNetRecovery
         internal float HeightAbovePlane(Vector3 worldPoint)
         {
             return WorldToNet(worldPoint).y - planeOffset;
+        }
+
+        internal float HorizontalDistanceFromCentre(Vector3 worldPoint)
+        {
+            Vector3 local = WorldToNet(worldPoint);
+            return Mathf.Sqrt(local.x * local.x + local.z * local.z);
         }
 
         private Vector3 NetToWorld(Vector3 netPoint)

@@ -53,6 +53,7 @@ LOG "mission,phase,ut,altitude,hook_height,v_vertical,v_horizontal,h_error,throt
 SAS OFF.
 RCS ON.
 BRAKES OFF.
+LOCK THROTTLE TO 0.
 
 PRINT "Target locked: " + RECOVERY_SHIP:NAME.
 PRINT "Booster probe core must be the craft root.".
@@ -61,10 +62,11 @@ FROM { LOCAL COUNTDOWN IS COUNTDOWN_SECONDS. } UNTIL COUNTDOWN = 0 STEP { SET CO
     WAIT 1.
 }
 
-// Start the engine while the real TT18-A clamps still carry the vehicle. Release
-// only after measured thrust-to-weight exceeds one.
+// Start the engine at zero throttle while the real TT18-A clamps still carry
+// the vehicle. Increase the command linearly over five seconds and release only
+// after measured thrust-to-weight strictly exceeds the configured threshold.
 LOCK STEERING TO UP.
-LOCK THROTTLE TO 1.
+LOCK THROTTLE TO 0.
 LOCAL ENGINE_LOAD_DEADLINE IS TIME:SECONDS + 15.
 WAIT UNTIL SHIP:ENGINES:LENGTH > 0
     OR TIME:SECONDS >= ENGINE_LOAD_DEADLINE.
@@ -74,22 +76,32 @@ IF MISSION_ENGINES:LENGTH = 0 {
     LOCK THROTTLE TO 0.
     SHUTDOWN.
 }
+LOCAL BOOSTER_ENGINE_COUNT IS 0.
+LOCAL IGNITION_STARTED_AT IS TIME:SECONDS.
 FOR ENGINE IN MISSION_ENGINES {
     IF ENGINE:NAME = BOOSTER_ENGINE_PART_NAME {
+        SET BOOSTER_ENGINE_COUNT TO BOOSTER_ENGINE_COUNT + 1.
         SET ENGINE:THRUSTLIMIT TO ASCENT_ENGINE_THRUST_LIMIT.
         ENGINE:ACTIVATE.
     }
 }
+IF BOOSTER_ENGINE_COUNT = 0 {
+    PRINT "ABORT: booster engine not found" AT(0,12).
+    LOCK THROTTLE TO 0.
+    SHUTDOWN.
+}
 PRINT "ENGINE START - TT18-A HOLD" AT(0,10).
 LOCAL RELEASE_TWR IS 0.
-LOCAL RELEASE_DEADLINE IS TIME:SECONDS + 8.
-UNTIL RELEASE_TWR > 1.02 OR TIME:SECONDS >= RELEASE_DEADLINE {
+LOCAL RELEASE_DEADLINE IS IGNITION_STARTED_AT
+    + ASCENT_IGNITION_RAMP_SECONDS + 5.
+UNTIL RELEASE_TWR > ASCENT_CLAMP_RELEASE_TWR
+      OR TIME:SECONDS >= RELEASE_DEADLINE {
+    LOCAL IGNITION_RAMP_FRACTION IS CLAMP((TIME:SECONDS
+        - IGNITION_STARTED_AT) / ASCENT_IGNITION_RAMP_SECONDS, 0, 1).
+    LOCK THROTTLE TO IGNITION_RAMP_FRACTION.
     LOCAL CURRENT_THRUST IS 0.
     FOR ENGINE IN MISSION_ENGINES {
         IF ENGINE:NAME = BOOSTER_ENGINE_PART_NAME {
-            // Activation is idempotent and closes a slow-unpack race in which
-            // the first request can arrive before the engine finishes starting.
-            ENGINE:ACTIVATE.
             SET CURRENT_THRUST TO CURRENT_THRUST + ENGINE:THRUST.
         }
     }
@@ -98,8 +110,8 @@ UNTIL RELEASE_TWR > 1.02 OR TIME:SECONDS >= RELEASE_DEADLINE {
     PRINT "hold-down TWR " + ROUND(RELEASE_TWR,2) + "   " AT(0,11).
     WAIT 0.05.
 }
-IF RELEASE_TWR <= 1.02 {
-    PRINT "ABORT: TWR did not exceed 1" AT(0,12).
+IF RELEASE_TWR <= ASCENT_CLAMP_RELEASE_TWR {
+    PRINT "ABORT: TWR did not exceed release threshold" AT(0,12).
     LOCK THROTTLE TO 0.
     SHUTDOWN.
 }
@@ -118,12 +130,16 @@ UNTIL BOOSTER_PROPELLANT_FRACTION() <= ASCENT_RESERVE_FRACTION
     // Smoothstep avoids a pitch-rate discontinuity at either end of the turn.
     LOCAL TURN_BLEND IS TURN_FRACTION^2 * (3 - 2 * TURN_FRACTION).
     LOCAL PITCH_CMD IS 90 - ASCENT_TURN_DEGREES * TURN_BLEND.
+    LOCAL ASCENT_THROTTLE_COMMAND IS 1.
     IF SHIP:ALTITUDE < ASCENT_SPEED_LIMIT_END
        AND SHIP:GROUNDSPEED > ASCENT_MAX_SPEED {
-        LOCK THROTTLE TO ASCENT_HIGH_SPEED_THROTTLE.
-    } ELSE {
-        LOCK THROTTLE TO 1.
+        SET ASCENT_THROTTLE_COMMAND TO ASCENT_HIGH_SPEED_THROTTLE.
     }
+    // Continue the same ramp after clamp release.  This avoids a discontinuous
+    // jump to full throttle if TWR crosses 1.05 before the five seconds expire.
+    LOCAL ASCENT_RAMP_LIMIT IS CLAMP((TIME:SECONDS - IGNITION_STARTED_AT)
+        / ASCENT_IGNITION_RAMP_SECONDS, 0, 1).
+    LOCK THROTTLE TO MIN(ASCENT_THROTTLE_COMMAND, ASCENT_RAMP_LIMIT).
     LOCK STEERING TO HEADING(ASCENT_HEADING, PITCH_CMD).
 
     IF TIME:SECONDS - LAST_LOG >= TELEMETRY_PERIOD {
@@ -140,6 +156,11 @@ UNTIL BOOSTER_PROPELLANT_FRACTION() <= ASCENT_RESERVE_FRACTION
 }
 
 LOCK THROTTLE TO 0.
+// The cable net owns the vehicle after all four hooks latch.  Leaving the kOS
+// steering manager active makes the reaction wheels fight the compliant
+// tethers, producing a periodic captured-stage sway even with zero throttle.
+UNLOCK STEERING.
+SAS OFF.
 LOCAL SEPARATION_RESERVE IS BOOSTER_PROPELLANT_FRACTION().
 LOG MISSION_ID + ",STAGE_RESERVE," + ROUND(TIME:SECONDS,3)
     + ",fraction=" + ROUND(SEPARATION_RESERVE,5)
@@ -182,6 +203,22 @@ IF DECOUPLE_EVENTS:LENGTH = 0 {
     SHUTDOWN.
 }
 DECOUPLE_MODULE:DOEVENT(DECOUPLE_EVENTS[0]).
+LOCAL SEPARATION_DEADLINE IS TIME:SECONDS + 3.
+WAIT UNTIL SHIP:PARTSNAMED("CZ10B-DemoUpperStage"):LENGTH = 0
+    OR TIME:SECONDS >= SEPARATION_DEADLINE.
+IF SHIP:PARTSNAMED("CZ10B-DemoUpperStage"):LENGTH > 0 {
+    // One transition retry covers the rare unloaded-event race without
+    // continuously replaying the decoupler or its sound.
+    DECOUPLE_MODULE:DOEVENT(DECOUPLE_EVENTS[0]).
+    SET SEPARATION_DEADLINE TO TIME:SECONDS + 2.
+    WAIT UNTIL SHIP:PARTSNAMED("CZ10B-DemoUpperStage"):LENGTH = 0
+        OR TIME:SECONDS >= SEPARATION_DEADLINE.
+}
+IF SHIP:PARTSNAMED("CZ10B-DemoUpperStage"):LENGTH > 0 {
+    PRINT "ERROR: upper stage did not separate".
+    LOCK THROTTLE TO 0.
+    SHUTDOWN.
+}
 WAIT 0.6.
 FOR ENGINE IN MISSION_ENGINES {
     IF ENGINE:NAME = BOOSTER_ENGINE_PART_NAME {
@@ -242,9 +279,10 @@ LOCK THROTTLE TO 0.
 LOCK STEERING TO LOOKDIRUP(-SHIP:VELOCITY:SURFACE:NORMALIZED,
     SHIP:UP:VECTOR).
 
-// 2) Below 40 km, burn retrograde until horizontal surface speed is below
-// 1000 m/s. This deliberately spends some reserve early to reduce heating and
-// gives the 30 km landing planner a much calmer initial state.
+// 2) Below 40 km, use a retrograde safety burn only if horizontal speed exceeds
+// the configured entry ceiling.  The flight value is 1500 m/s, so the nominal
+// trajectory preserves vertical energy and propellant for the efficient,
+// height-indexed lateral stop beginning at 30 km.
 WAIT UNTIL SHIP:ALTITUDE <= ENTRY_DECEL_HEIGHT.
 PRINT "40 KM RETROGRADE ENTRY BURN" AT(0,11).
 LOCAL ENTRY_H_SPEED IS VXCL(SHIP:UP:VECTOR:NORMALIZED,
@@ -412,10 +450,13 @@ LOCAL PLAN_H_ERROR_SLOPE0 IS -PLAN_H_VEL
 LOCAL FUEL_URGENT IS FALSE.
 LOCAL WAS_PID_MODE IS FALSE.
 LOCAL CAPTURE_ALIGN_MODE IS FALSE.
+LOCAL CAPTURE_ALIGN_SPEED_LIMIT IS TERMINAL_ALIGN_SPEED.
+LOCAL HORIZONTAL_SETTLE_MODE IS FALSE.
 LOCAL WIRE_HOLD_STARTED_AT IS -1.
 LOCAL FINAL_ALIGN_MODE IS FALSE.
 LOCAL FINAL_ALIGN_STARTED_AT IS -1.
 LOCAL FINAL_DESCENT_ARMED IS FALSE.
+LOCAL TERMINAL_STEERING_TUNED IS FALSE.
 LOCAL FILTERED_H_ACCEL IS V(0,0,0).
 SET LAST_LOG TO TIME:SECONDS.
 
@@ -435,14 +476,39 @@ UNTIL HOOK_CAPTURED() {
     LOCAL G_ACC IS SHIP:BODY:MU / ((SHIP:BODY:RADIUS + SHIP:ALTITUDE)^2).
     LOCAL AVAILABLE_ACC IS SHIP:AVAILABLETHRUST / MAX(SHIP:MASS, 0.001).
 
+    IF NOT TERMINAL_STEERING_TUNED
+        AND HOOK_HEIGHT <= TERMINAL_STEERING_TUNE_HEIGHT {
+        // kOS computes the torque PID gains from these settling times.  A
+        // longer near-field response removes the reaction-wheel limit cycle
+        // without changing the translational acceleration or tilt targets.
+        SET STEERINGMANAGER:PITCHTS TO TERMINAL_STEERING_PITCH_YAW_TS.
+        SET STEERINGMANAGER:YAWTS TO TERMINAL_STEERING_PITCH_YAW_TS.
+        SET STEERINGMANAGER:ROLLTS TO TERMINAL_STEERING_ROLL_TS.
+        STEERINGMANAGER:RESETPIDS().
+        SET TERMINAL_STEERING_TUNED TO TRUE.
+    }
+
     LOCAL PID_MODE IS HOOK_HEIGHT <= PID_SWITCH_HEIGHT.
     LOCAL H_CORRIDOR_MODE IS HOOK_HEIGHT <= HORIZONTAL_CORRIDOR_HEIGHT
         AND HORIZONTAL_POS:MAG <= HORIZONTAL_CORRIDOR_RANGE.
     // This latch is intentionally one-way. Once the stage reaches the ship's
     // capture neighbourhood, a centre crossing must not re-arm the faster
     // stopping profile in the opposite direction.
-    IF H_CORRIDOR_MODE AND HORIZONTAL_POS:MAG <= TERMINAL_ALIGN_RANGE {
+    IF NOT CAPTURE_ALIGN_MODE AND H_CORRIDOR_MODE
+        AND HORIZONTAL_POS:MAG <= TERMINAL_ALIGN_RANGE {
         SET CAPTURE_ALIGN_MODE TO TRUE.
+        LOCAL CAPTURE_ALIGN_RADIAL_SPEED IS 0.
+        IF HORIZONTAL_POS:MAG > 0 {
+            SET CAPTURE_ALIGN_RADIAL_SPEED TO VDOT(
+                HORIZONTAL_POS:NORMALIZED, HORIZONTAL_VEL).
+        }
+        // This is a one-way *deceleration* handoff.  The old 30 m/s cap could
+        // command a stage already approaching at 8-12 m/s to accelerate again
+        // inside 300 m, feeding the attitude lag and causing another pass.
+        // Keep enough floor for a near-tangential entry to converge; otherwise
+        // never ask for more than the inward speed measured at the latch.
+        SET CAPTURE_ALIGN_SPEED_LIMIT TO MAX(
+            TERMINAL_ALIGN_MIN_SPEED, CAPTURE_ALIGN_RADIAL_SPEED).
     }
     // Enter this state only once.  Holding the latch prevents a small position
     // excursion from switching the outer controller back on during settling.
@@ -555,7 +621,14 @@ UNTIL HOOK_CAPTURED() {
             * TERMINAL_PLAN_VELOCITY_GAIN.
     SET H_ACCEL TO CLAMPV(H_ACCEL, TERMINAL_MAX_HORIZONTAL_ACCEL).
 
-    IF H_CORRIDOR_MODE {
+    // The 30 km Hermite trajectory owns the high-energy translation.  Once its
+    // one-way 300 m neighbourhood latch fires, use the range-indexed velocity
+    // field immediately instead of continuing to chase the mathematical path
+    // down to 2 km.  Real-flight telemetry showed the old delayed handoff
+    // crossing the ship near 5-6 km, then holding a 60-80 m correction and a
+    // near-horizontal attitude all the way to the waypoint.
+    IF H_CORRIDOR_MODE AND (CAPTURE_ALIGN_MODE
+        OR HOOK_HEIGHT <= TERMINAL_WAYPOINT_HEIGHT) {
         // A range-indexed stopping-speed corridor replaces the former direct
         // position gain. The old loop entered at 18 m with residual lateral
         // speed, crossed the ship, then repeatedly reversed. Enter early and
@@ -578,19 +651,60 @@ UNTIL HOOK_CAPTURED() {
             // second attitude response. A centre
             // crossing can now produce only a small correction, not another
             // full-speed pursuit in the opposite direction.
-            SET PID_H_SPEED TO MIN(TERMINAL_ALIGN_SPEED,
-                PID_STOP_RANGE * TERMINAL_ALIGN_POSITION_GAIN).
+            // Preserve the outer stopping envelope as a hard upper bound.
+            // The former assignment replaced PID_STOP_SPEED with the linear
+            // position field, so TERMINAL_HORIZONTAL_STOP_ACCEL had no effect
+            // after capture-align latched—the exact phase where attitude-lag
+            // braking was required.
+            SET PID_H_SPEED TO MIN(PID_H_SPEED,
+                MIN(TERMINAL_ALIGN_SPEED,
+                    MIN(CAPTURE_ALIGN_SPEED_LIMIT,
+                        PID_STOP_RANGE * TERMINAL_ALIGN_POSITION_GAIN))).
         }
         LOCAL DESIRED_H_VEL IS V(0,0,0).
         IF PID_RANGE > TERMINAL_HORIZONTAL_DEADBAND {
             SET DESIRED_H_VEL TO HORIZONTAL_POS:NORMALIZED * PID_H_SPEED.
         }
         LOCAL PID_VELOCITY_GAIN IS H_VEL_KP.
+        LOCAL PID_ACCEL_LIMIT IS TERMINAL_MAX_HORIZONTAL_ACCEL.
         IF CAPTURE_ALIGN_MODE {
             SET PID_VELOCITY_GAIN TO TERMINAL_ALIGN_VELOCITY_GAIN.
+            SET PID_ACCEL_LIMIT TO MAX(TERMINAL_HORIZONTAL_STOP_ACCEL,
+                MIN(TERMINAL_MAX_HORIZONTAL_ACCEL,
+                    MAX(PID_STOP_RANGE * TERMINAL_ALIGN_ACCEL_RANGE_GAIN,
+                        HORIZONTAL_VEL:MAG
+                            * TERMINAL_ALIGN_ACCEL_VELOCITY_GAIN))).
         }
         SET H_ACCEL TO CLAMPV((DESIRED_H_VEL - HORIZONTAL_VEL)
-            * PID_VELOCITY_GAIN, TERMINAL_MAX_HORIZONTAL_ACCEL).
+            * PID_VELOCITY_GAIN, PID_ACCEL_LIMIT).
+    }
+
+    // Once both formal horizontal limits are first satisfied, position chasing
+    // is counterproductive above the waypoint: attitude lag can turn a tiny
+    // correction into another centre crossing and keep the long stage broadside
+    // to the airflow.  Latch a pure velocity-damping finish, with a shallow
+    // acceleration cap.  At the 2 km waypoint hand control back to the bounded
+    // range field: real-flight telemetry showed that aerodynamic drift can add
+    // roughly 140 m after this latch, which is outside the 1 km final-align
+    // acquisition radius if position feedback remains disabled forever.
+    IF NOT HORIZONTAL_SETTLE_MODE AND CAPTURE_ALIGN_MODE
+        AND HORIZONTAL_POS:MAG <= TERMINAL_ALIGN_SETTLE_ENTRY_RANGE
+        AND HORIZONTAL_VEL:MAG <= TERMINAL_ALIGN_SETTLE_ENTRY_SPEED {
+        SET HORIZONTAL_SETTLE_MODE TO TRUE.
+        SET FILTERED_H_ACCEL TO V(0,0,0).
+    }
+    IF HORIZONTAL_SETTLE_MODE
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
+        SET H_ACCEL TO CLAMPV(HORIZONTAL_POS
+            * TERMINAL_ALIGN_SETTLE_POSITION_GAIN
+            - HORIZONTAL_VEL * TERMINAL_ALIGN_SETTLE_VELOCITY_GAIN,
+            TERMINAL_ALIGN_SETTLE_MAX_ACCEL).
+        IF HORIZONTAL_POS:MAG > TERMINAL_ALIGN_REACQUIRE_RANGE {
+            SET H_ACCEL TO CLAMPV(HORIZONTAL_POS
+                * TERMINAL_ALIGN_REACQUIRE_POSITION_GAIN
+                - HORIZONTAL_VEL * TERMINAL_ALIGN_SETTLE_VELOCITY_GAIN,
+                TERMINAL_ALIGN_REACQUIRE_MAX_ACCEL).
+        }
     }
 
     IF FINAL_ALIGN_MODE AND NOT FINAL_DESCENT_ARMED {
@@ -646,12 +760,14 @@ UNTIL HOOK_CAPTURED() {
             + V_VEL_KP * (PID_TARGET_V - VERTICAL_V)
             + V_VEL_KI * VERTICAL_INTEGRAL.
     }
-    IF FINAL_ALIGN_MODE AND NOT FINAL_DESCENT_ARMED {
-        // Alignment continues while descending.  A real-flight trace showed
-        // that even a bounded stationary settle could consume the remaining
-        // propellant a few metres above the cables.  FINAL_ALIGN_HOLD_SECONDS
-        // remains configurable for test articles, but the flight value is
-        // zero so the stage never trades its landing reserve for a hover.
+    IF FINAL_ALIGN_MODE AND NOT FINAL_DESCENT_ARMED
+        AND HOOK_HEIGHT <= FINAL_ALIGN_VERTICAL_CONTROL_HEIGHT {
+        // Horizontal settling begins higher, but vertical slowdown remains a
+        // near-field action.  A real-flight trace showed that extending the
+        // slow descent itself would consume the remaining propellant above the
+        // cables. FINAL_ALIGN_HOLD_SECONDS remains configurable for test
+        // articles, but the flight value is zero so the stage never trades its
+        // landing reserve for a hover.
         LOCAL FINAL_TARGET_V IS 0.
         // Low fuel must never be traded for a stationary final two-metre
         // correction. Keep aligning during a capture-envelope-safe descent.
@@ -666,9 +782,42 @@ UNTIL HOOK_CAPTURED() {
             + V_VEL_KP * (FINAL_TARGET_V - VERTICAL_V)
             + V_VEL_KI * VERTICAL_INTEGRAL.
     }
+    IF FINAL_DESCENT_ARMED AND FUEL_URGENT AND NOT PID_MODE
+        AND HOOK_HEIGHT <= FINAL_ALIGN_VERTICAL_CONTROL_HEIGHT {
+        // Once the horizontal capture commitment is safe, do not let the
+        // height corridor slow the stage below the decisive low-fuel crossing
+        // speed.  A real flight decelerated from 3.85 to 2.30 m/s above the
+        // 18 m PID handover, then spent its last propellant accelerating back
+        // to 6 m/s and free-fell through the net at 13.78 m/s.  Carrying the
+        // same envelope-safe target continuously removes that waste; PID_MODE
+        // takes over with the identical target below its normal handover.
+        LOCAL COMMITTED_FUEL_TARGET_V IS
+            -TERMINAL_LOW_FUEL_CAPTURE_SPEED.
+        SET VERTICAL_INTEGRAL TO CLAMP(VERTICAL_INTEGRAL
+            + (COMMITTED_FUEL_TARGET_V - VERTICAL_V) * DT, -10, 10).
+        SET VERTICAL_THRUST_CMD TO G_ACC
+            + V_VEL_KP * (COMMITTED_FUEL_TARGET_V - VERTICAL_V)
+            + V_VEL_KI * VERTICAL_INTEGRAL.
+    }
     IF FINAL_DESCENT_ARMED {
-        SET H_ACCEL TO CLAMPV(-HORIZONTAL_VEL
-            * FINAL_CAPTURE_VELOCITY_GAIN, FINAL_CAPTURE_MAX_ACCEL).
+        // Vertical capture is a one-way mode, but it still owns a deliberately
+        // slow centring field. Pure velocity damping allowed a 6-7 m committed
+        // alignment to drift beyond the cable cradle's short-axis travel during
+        // the final low-fuel crossing. The 0.75 m/s cap cannot recreate the old
+        // centre-chasing pass or demand a large low-altitude tilt.
+        LOCAL FINAL_CAPTURE_DESIRED_H_VEL IS V(0,0,0).
+        LOCAL FINAL_CAPTURE_POSITION_RANGE IS HORIZONTAL_POS:MAG.
+        IF FINAL_CAPTURE_POSITION_RANGE > FINAL_CAPTURE_POSITION_DEADBAND {
+            LOCAL FINAL_CAPTURE_SPEED IS MIN(FINAL_CAPTURE_MAX_SPEED,
+                (FINAL_CAPTURE_POSITION_RANGE
+                    - FINAL_CAPTURE_POSITION_DEADBAND)
+                * FINAL_CAPTURE_POSITION_GAIN).
+            SET FINAL_CAPTURE_DESIRED_H_VEL TO
+                HORIZONTAL_POS:NORMALIZED * FINAL_CAPTURE_SPEED.
+        }
+        SET H_ACCEL TO CLAMPV((FINAL_CAPTURE_DESIRED_H_VEL
+            - HORIZONTAL_VEL) * FINAL_CAPTURE_VELOCITY_GAIN,
+            FINAL_CAPTURE_MAX_ACCEL).
     }
     LOCAL CURRENT_ACCEL_FILTER IS TERMINAL_ACCEL_FILTER.
     IF H_CORRIDOR_MODE AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
@@ -680,7 +829,11 @@ UNTIL HOOK_CAPTURED() {
     SET VERTICAL_THRUST_CMD TO CLAMP(VERTICAL_THRUST_CMD, 0,
         AVAILABLE_ACC * TERMINAL_NOMINAL_THRUST_FRACTION).
 
-    LOCAL ALT_BLEND IS CLAMP(HOOK_HEIGHT / 800, 0, 1).
+    // Keep full entry authority through the 2 km waypoint, then taper it
+    // smoothly to the 12-degree landing cone by 500 m.  The former 800 m
+    // blend still allowed 29 degrees at 239 m and produced a measured
+    // 16 deg/s attitude spike during a small centre correction.
+    LOCAL ALT_BLEND IS CLAMP((HOOK_HEIGHT - 500) / 1500, 0, 1).
     LOCAL TILT_LIMIT IS ENTRY_MAX_TILT * ALT_BLEND
         + LANDING_MAX_TILT * (1 - ALT_BLEND).
     // Horizontal braking and tilt are coupled.  When the vertical descent is
@@ -697,8 +850,29 @@ UNTIL HOOK_CAPTURED() {
         AND HOOK_HEIGHT > 500 {
         LOCAL REQUIRED_VERTICAL_FOR_TILT IS H_ACCEL:MAG
             / MAX(TAN(TILT_LIMIT), 0.01).
-        SET VERTICAL_THRUST_CMD TO MIN(MAX(VERTICAL_THRUST_CMD,
-            REQUIRED_VERTICAL_FOR_TILT),
+        LOCAL COUPLED_VERTICAL_THRUST IS VERTICAL_THRUST_CMD.
+        IF HOOK_HEIGHT >= TERMINAL_WAYPOINT_HEIGHT {
+            // At the 89-degree direct-control limit, realising the full
+            // 55 m/s^2 lateral command needs only about 0.96 m/s^2 vertically.
+            // This decouples the stop from vertical braking below the 300 m/s
+            // load-cone handoff; the old 80-degree vector cancelled nearly one
+            // gravity and slowed the stage to roughly 110 m/s at the waypoint.
+            SET COUPLED_VERTICAL_THRUST TO MAX(VERTICAL_THRUST_CMD,
+                REQUIRED_VERTICAL_FOR_TILT).
+        } ELSE {
+            // Below the waypoint, fade the extra component away as descent
+            // approaches 190 m/s. This prevents a small final correction from
+            // producing an upward hop.
+            LOCAL COUPLING_MIN_DOWN_SPEED IS
+                TERMINAL_WAYPOINT_VERTICAL_SPEED.
+            LOCAL COUPLING_BLEND IS CLAMP((-VERTICAL_V
+                - COUPLING_MIN_DOWN_SPEED)
+                / TERMINAL_DESCENT_COUPLING_BAND, 0, 1).
+            SET COUPLED_VERTICAL_THRUST TO VERTICAL_THRUST_CMD
+                + (MAX(VERTICAL_THRUST_CMD, REQUIRED_VERTICAL_FOR_TILT)
+                    - VERTICAL_THRUST_CMD) * COUPLING_BLEND.
+        }
+        SET VERTICAL_THRUST_CMD TO MIN(COUPLED_VERTICAL_THRUST,
             AVAILABLE_ACC * TERMINAL_NOMINAL_THRUST_FRACTION).
     }
     LOCAL MAX_H_ACCEL IS MAX(VERTICAL_THRUST_CMD, G_ACC * 0.2)
@@ -735,8 +909,12 @@ UNTIL HOOK_CAPTURED() {
     LOCK THROTTLE TO THROTTLE_CMD.
 
     LOCAL GUIDANCE_PHASE IS "TRAJECTORY".
-    IF H_CORRIDOR_MODE { SET GUIDANCE_PHASE TO "H_STOPPING". }
+    IF H_CORRIDOR_MODE
+        AND HOOK_HEIGHT <= TERMINAL_WAYPOINT_HEIGHT {
+        SET GUIDANCE_PHASE TO "H_STOPPING".
+    }
     IF CAPTURE_ALIGN_MODE { SET GUIDANCE_PHASE TO "H_ALIGN". }
+    IF HORIZONTAL_SETTLE_MODE { SET GUIDANCE_PHASE TO "H_SETTLE". }
     IF PID_MODE { SET GUIDANCE_PHASE TO "PID_TERMINAL". }
     IF FINAL_ALIGN_MODE { SET GUIDANCE_PHASE TO "FINAL_ALIGN". }
     IF FINAL_DESCENT_ARMED { SET GUIDANCE_PHASE TO "VERTICAL_CAPTURE". }

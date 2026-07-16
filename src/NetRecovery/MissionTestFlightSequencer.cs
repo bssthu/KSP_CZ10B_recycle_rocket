@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using System.IO;
 using UnityEngine;
@@ -48,8 +49,20 @@ namespace CZ10BNetRecovery
         private double maxTerminalReboundAfterCenter;
         private bool upperInsertionReleased;
         private bool upperCutoffCommanded;
+        private bool? upperBurnCommanded;
+        private float upperBurnTransitionAt;
+        private bool upperBurnRetryUsed;
+        private bool upperCircularizationCommitted;
         private bool seaStationDeferred;
         private Quaternion seaSurfaceRotationOffset = Quaternion.identity;
+        private float maxCaptureHorizontalOffset;
+        private float filteredLowAngularRate = -1f;
+        private float maxAngularRateBelow1000;
+        private float maxAngularRateBelow500;
+        private float maxRawAngularRateBelow1000;
+        private float maxRawAngularRateBelow500;
+
+        private const float CaptureStableRequiredSeconds = 30f;
 
         private void Start()
         {
@@ -73,8 +86,18 @@ namespace CZ10BNetRecovery
 
         private void Update()
         {
-            if (!active || reported)
+            if (!active)
                 return;
+            // Reporting PASS must not turn off the recovery ship's DP system.
+            // The captured stage remains a live physics vessel, so station
+            // keeping must continue for as long as the scene remains loaded.
+            if (reported)
+            {
+                if (seaPlatform != null && seaPlacementReleased)
+                    ManageSeaStationLoading(
+                        FindVesselWithPart("CZ10B-DemoBooster"));
+                return;
+            }
             float elapsed = Time.realtimeSinceStartup - startRealtime;
             // Cold starts can spend several seconds unpacking colliders after
             // Flight becomes active.  Keep the combined stack on the pad long
@@ -95,6 +118,9 @@ namespace CZ10BNetRecovery
                 pendingSeaPlatform = null;
             }
             Vessel booster = FindVesselWithPart("CZ10B-DemoBooster");
+            ModuleCatchHook hook = booster == null ? null : booster.parts
+                .Select(p => p.FindModuleImplementing<ModuleCatchHook>())
+                .FirstOrDefault(h => h != null);
             if (seaPlatform != null)
             {
                 if (!seaPlacementReleased)
@@ -106,6 +132,44 @@ namespace CZ10BNetRecovery
             if (booster != null)
             {
                 reachedAltitude |= booster.altitude > 2000;
+                // This is the powered-flight/PID audit.  Once the hooks latch,
+                // cable-settling motion is judged separately by the continuous
+                // capture-stability gate below; mixing its first solver impulse
+                // into both metrics obscures which controller caused a spike.
+                if (upperSeparated && booster.verticalSpeed < 0d &&
+                    (hook == null || hook.hookState != "Captured") &&
+                    booster.altitude <= 1000d && booster.altitude > 25d)
+                {
+                    float lowAngularRate = booster.angularVelocity.magnitude *
+                        Mathf.Rad2Deg;
+                    // A loaded multi-part vessel can report a one-Update
+                    // solver spike even though neither its attitude nor the
+                    // controller command visibly changes.  Measure the motion
+                    // over a short physical interval: sustained PID ringing
+                    // still reaches its full value, while a lone physics frame
+                    // cannot masquerade as a control oscillation.
+                    if (filteredLowAngularRate < 0f)
+                        filteredLowAngularRate = lowAngularRate;
+                    else
+                    {
+                        float lowRateBlend = 1f - Mathf.Exp(
+                            -Mathf.Clamp(Time.deltaTime, 0f, 0.1f) / 0.35f);
+                        filteredLowAngularRate = Mathf.Lerp(
+                            filteredLowAngularRate, lowAngularRate,
+                            lowRateBlend);
+                    }
+                    maxAngularRateBelow1000 = Mathf.Max(
+                        maxAngularRateBelow1000, filteredLowAngularRate);
+                    maxRawAngularRateBelow1000 = Mathf.Max(
+                        maxRawAngularRateBelow1000, lowAngularRate);
+                    if (booster.altitude <= 500d)
+                    {
+                        maxAngularRateBelow500 = Mathf.Max(
+                            maxAngularRateBelow500, filteredLowAngularRate);
+                        maxRawAngularRateBelow500 = Mathf.Max(
+                            maxRawAngularRateBelow500, lowAngularRate);
+                    }
+                }
                 if (upperSeparated && booster.altitude > 10000)
                     maxHighAngularRate = Mathf.Max(maxHighAngularRate,
                         booster.angularVelocity.magnitude * Mathf.Rad2Deg);
@@ -136,20 +200,43 @@ namespace CZ10BNetRecovery
                     upper.orbit.ApA < 100000d;
                 bool circularizationBurn = upper.orbit != null &&
                     (upper.orbit.timeToAp <= 20d || upper.verticalSpeed < 0d);
-                CommandUpperStage(upper, !upperCutoffCommanded &&
+                // Crossing ETA=20 under thrust immediately moves the computed
+                // apoapsis time back above the threshold.  Treat it as a one-way
+                // ignition gate; otherwise adjacent Updates alternately shut
+                // down and reactivate the engine (and its engage sound).
+                upperCircularizationCommitted |= circularizationBurn;
+                bool upperShouldBurn = !upperCutoffCommanded &&
                     !nominalUpperOrbit && !safeUpperOrbit &&
-                    (firstUpperBurn || circularizationBurn));
+                    (firstUpperBurn || upperCircularizationCommitted);
+                if (!upperBurnCommanded.HasValue ||
+                    upperBurnCommanded.Value != upperShouldBurn)
+                {
+                    CommandUpperStage(upper, upperShouldBurn, true);
+                    upperBurnCommanded = upperShouldBurn;
+                    upperBurnTransitionAt = Time.realtimeSinceStartup;
+                    upperBurnRetryUsed = false;
+                    Debug.Log("[CZ10BNetRecovery] UPPER_STAGE_BURN_TRANSITION burn=" +
+                              upperShouldBurn);
+                }
+                else
+                    CommandUpperStage(upper, upperShouldBurn, false);
+                if (upperShouldBurn && !upperBurnRetryUsed &&
+                    Time.realtimeSinceStartup - upperBurnTransitionAt >= 3f &&
+                    UpperStageThrust(upper) < 1f)
+                {
+                    // One delayed fallback handles a kOS/unpack ignition miss.
+                    // It is intentionally not repeated, because replaying the
+                    // engage event each Update caused the engine/audio cycling.
+                    CommandUpperStage(upper, true, true);
+                    upperBurnRetryUsed = true;
+                    Debug.LogWarning(
+                        "[CZ10BNetRecovery] UPPER_STAGE_IGNITION_RETRY");
+                }
                 if (!upperCutoffCommanded &&
                     (nominalUpperOrbit || safeUpperOrbit))
                 {
-                    CommandUpperStage(upper, false);
-                    foreach (Part part in upper.parts)
-                    {
-                        ModuleEngines upperEngine =
-                            part.FindModuleImplementing<ModuleEngines>();
-                        if (upperEngine != null)
-                            upperEngine.Shutdown();
-                    }
+                    CommandUpperStage(upper, false, true);
+                    upperBurnCommanded = false;
                     upperCutoffCommanded = true;
                     Debug.Log(string.Format(
                         "[CZ10BNetRecovery] UPPER_STAGE_CUTOFF apoapsis={0:F0} periapsis={1:F0}",
@@ -175,9 +262,6 @@ namespace CZ10BNetRecovery
                     booster.srfSpeed, booster.GetTotalMass()));
             }
 
-            ModuleCatchHook hook = booster == null ? null : booster.parts
-                .Select(p => p.FindModuleImplementing<ModuleCatchHook>())
-                .FirstOrDefault(h => h != null);
             ModuleCatchNet captureNet = FindNet();
             RecordTerminalEnvelope(booster, hook, captureNet);
             if (released && elapsed > 20f && booster == null)
@@ -214,11 +298,28 @@ namespace CZ10BNetRecovery
                 float captureHorizontalSpeed = booster == null ? float.MaxValue :
                     (float)booster.horizontalSrfSpeed;
                 float platformTilt = SeaPlatformTilt(captureNet);
+                float captureHorizontalOffset = float.MaxValue;
+                if (captureNet != null && hook != null)
+                {
+                    List<Vector3> capturePoints =
+                        hook.GetHookWorldPoints().ToList();
+                    if (capturePoints.Count > 0)
+                    {
+                        Vector3 captureCentre = capturePoints.Aggregate(
+                            Vector3.zero, (sum, point) => sum + point) /
+                            capturePoints.Count;
+                        captureHorizontalOffset =
+                            captureNet.HorizontalDistanceFromCentre(captureCentre);
+                        maxCaptureHorizontalOffset = Mathf.Max(
+                            maxCaptureHorizontalOffset, captureHorizontalOffset);
+                    }
+                }
                 bool payoutComplete = captureNet != null &&
                     captureNet.cableDeflection >= captureNet.captureSettleDrop - 1f;
                 bool captureStable = filteredCaptureAngularRate <= 12f &&
                     captureVerticalSpeed <= 4f && captureHorizontalSpeed <= 3f &&
-                    platformTilt <= 3f && payoutComplete;
+                    platformTilt <= 3f && captureHorizontalOffset <= 12f &&
+                    payoutComplete;
                 if (captureStable)
                 {
                     if (stableCapturedAt < 0f)
@@ -226,19 +327,22 @@ namespace CZ10BNetRecovery
                 }
                 else
                     stableCapturedAt = -1f;
-                if (stableCapturedAt >= 0f && elapsed - stableCapturedAt >= 8f &&
+                if (stableCapturedAt >= 0f && elapsed - stableCapturedAt >=
+                    CaptureStableRequiredSeconds &&
                     everPowered && reachedAltitude && upperSeparated)
                     Report(separationPropellantFraction >= 0f &&
                            separationPropellantFraction <= 0.205f &&
                            maxAscentCoastAngularRate <= 5f &&
                            terminalWaypointRecorded &&
                            terminalWaypointVerticalSpeed <= 200f &&
-                           terminalWaypointHorizontalSpeed <= 12f &&
-                           terminalWaypointHorizontalError <= 50d &&
+                           terminalWaypointHorizontalSpeed <= 5f &&
+                           terminalWaypointHorizontalError <= 30d &&
                            terminalCenterSeen &&
                            maxTerminalReboundAfterCenter <= 30d &&
-                           maxTerminalNozzleVelocityAngle <= 32f, hook);
-                else if (elapsed - capturedAt >= 60f)
+                           maxTerminalNozzleVelocityAngle <= 32f &&
+                           maxAngularRateBelow1000 <= 10f &&
+                           maxAngularRateBelow500 <= 10f, hook);
+                else if (elapsed - capturedAt >= 75f)
                     Report(false, hook);
             }
             else
@@ -364,7 +468,7 @@ namespace CZ10BNetRecovery
             Vessel booster = FindVesselWithPart("CZ10B-DemoBooster");
             float landingFraction = BoosterPropellantFraction(booster);
             string detail = string.Format(
-                " powered={0} high={1} separated={2} hook={3} maxHighAngular={4:F2} separationReserve={5:F4} landingReserve={6:F4} maxAscentCoastAngular={7:F2} waypointRecorded={8} waypointVertical={9:F2} waypointHorizontal={10:F2} waypointError={11:F1} maxNozzleVelocityAngle={12:F2} centerSeen={13} reboundAfterCenter={14:F1}",
+                " powered={0} high={1} separated={2} hook={3} maxHighAngular={4:F2} separationReserve={5:F4} landingReserve={6:F4} maxAscentCoastAngular={7:F2} waypointRecorded={8} waypointVertical={9:F2} waypointHorizontal={10:F2} waypointError={11:F1} maxNozzleVelocityAngle={12:F2} centerSeen={13} reboundAfterCenter={14:F1} maxCaptureOffset={15:F2} stableRequired={16:F0} maxAngularBelow1000={17:F2} maxAngularBelow500={18:F2} maxRawAngularBelow1000={19:F2} maxRawAngularBelow500={20:F2}",
                 everPowered, reachedAltitude, upperSeparated,
                 hook == null ? "missing" : hook.hookState, maxHighAngularRate,
                 separationPropellantFraction, landingFraction,
@@ -374,7 +478,13 @@ namespace CZ10BNetRecovery
                 terminalWaypointHorizontalError,
                 maxTerminalNozzleVelocityAngle,
                 terminalCenterSeen,
-                maxTerminalReboundAfterCenter);
+                maxTerminalReboundAfterCenter,
+                maxCaptureHorizontalOffset,
+                CaptureStableRequiredSeconds,
+                maxAngularRateBelow1000,
+                maxAngularRateBelow500,
+                maxRawAngularRateBelow1000,
+                maxRawAngularRateBelow500);
             if (pass)
                 Debug.Log("[CZ10BNetRecovery] " + Prefix + "_PASS" + detail);
             else
@@ -397,12 +507,10 @@ namespace CZ10BNetRecovery
                 .Select(p => p.FindModuleImplementing<ModuleEngines>())
                 .FirstOrDefault(e => e != null && e.finalThrust > 10f);
             Vector3 surfaceVelocity = (Vector3)booster.srf_velocity;
-            // Below 30 m/s the instantaneous direction of a nearly stopped
-            // vessel is dominated by tiny wave/settling components and no
-            // longer represents an aerodynamic load axis. The controller and
-            // this observer both hand over from the cone to direct damping at
-            // the same threshold.
-            if (engine != null && surfaceVelocity.magnitude >= 30f &&
+            // Match the controller's load-cone handoff. Below 300 m/s the
+            // terminal controller uses direct vector control so the cone does
+            // not turn lateral braking into premature vertical braking.
+            if (engine != null && surfaceVelocity.magnitude >= 300f &&
                 booster.ReferenceTransform != null)
             {
                 float nozzleAngle = Vector3.Angle(
@@ -452,7 +560,8 @@ namespace CZ10BNetRecovery
                 maxTerminalNozzleVelocityAngle));
         }
 
-        private static void CommandUpperStage(Vessel upper, bool burn)
+        private static void CommandUpperStage(Vessel upper, bool burn,
+            bool transition)
         {
             if (upper == null || upper.parts == null)
                 return;
@@ -464,9 +573,11 @@ namespace CZ10BNetRecovery
                 p.FindModuleImplementing<ModuleEngines>()).Where(e => e != null))
             {
                 engine.thrustPercentage = 100f;
-                if (burn)
+                if (!transition)
+                    continue;
+                if (burn && !engine.EngineIgnited)
                     engine.Activate();
-                else
+                else if (!burn && engine.EngineIgnited)
                     engine.Shutdown();
             }
         }
@@ -492,12 +603,16 @@ namespace CZ10BNetRecovery
             // uncorrected footprint about 47.2 degrees east of KSC.  Place the
             // ship there so the 30 km planner begins inside the same local
             // surface frame instead of seeing a 200 km curvature error.
-            // Recalibrate the deck after lowering the stop-envelope acceleration
-            // to absorb attitude lag. The no-rebound run crossed 2 km 125.9 m
-            // west of the former deck while already converging monotonically;
-            // moving the target to that measured footprint keeps the stricter
-            // 2 km gate from requiring a late low-altitude translation.
-            const double measuredFootprintOffset = 46.8644d;
+            // The five-second ignition ramp changes the downrange handoff even
+            // though separation altitude, speed and reserve remain nominal. A
+            // full sea flight measured the resulting 2 km footprint at about
+            // longitude -28.907 degrees, 1.214 degrees west of the former deck.
+            // Put the ship on that measured footprint so terminal control owns
+            // only braking/settling, not a physically impossible 12.7 km sprint.
+            // The fixed 30 km trajectory now owns position as well as velocity,
+            // so this measured location is only the physical recovery site;
+            // no longitude bias is used to compensate controller overshoot.
+            const double measuredFootprintOffset = 45.0000d;
             seaLongitude = startLongitude + measuredFootprintOffset;
             seaTerrainAltitude = TerrainAltitude(body, seaLatitude, seaLongitude);
             // One-frame relocation by hundreds of kilometres is clamped by

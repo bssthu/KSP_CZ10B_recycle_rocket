@@ -53,7 +53,7 @@ def main() -> int:
         name: sum(row["phase"] == name for row in mission_rows)
         for name in (
             "ASCENT", "COAST", "BOOSTBACK", "ENTRY", "TRAJECTORY",
-            "H_STOPPING", "H_ALIGN", "PID_TERMINAL", "FINAL_ALIGN",
+            "H_STOPPING", "H_ALIGN", "H_SETTLE", "PID_TERMINAL", "FINAL_ALIGN",
             "VERTICAL_CAPTURE", "TERMINAL",
         )
     }
@@ -66,7 +66,7 @@ def main() -> int:
         "",
     )
     terminal_names = {
-        "TRAJECTORY", "H_STOPPING", "H_ALIGN", "PID_TERMINAL",
+        "TRAJECTORY", "H_STOPPING", "H_ALIGN", "H_SETTLE", "PID_TERMINAL",
         "FINAL_ALIGN", "VERTICAL_CAPTURE",
     } if phase in {"PID_TERMINAL", "FINAL_ALIGN", "VERTICAL_CAPTURE"} else {phase}
     flight = [row for row in mission_rows if row["phase"] in terminal_names]
@@ -83,6 +83,14 @@ def main() -> int:
     saturated = sum(float(row["throttle"]) > 0.98 for row in flight) / len(flight)
     min_error = min(float(row["h_error"]) for row in low or flight)
     max_tilt_low = max(float(row["tilt"]) for row in low or flight)
+    final_align_rows = [row for row in flight if row["phase"] == "FINAL_ALIGN"]
+    final_align_entry = final_align_rows[0] if final_align_rows else None
+    vertical_capture_rows = [
+        row for row in flight if row["phase"] == "VERTICAL_CAPTURE"
+    ]
+    vertical_capture_entry = (
+        vertical_capture_rows[0] if vertical_capture_rows else None
+    )
     hover_time = 0.0
     entered_center = False
     rebound_after_center = 0.0
@@ -114,19 +122,63 @@ def main() -> int:
     print(f"throttle_saturation_fraction={saturated:.1%}")
     print(f"max_tilt_below_100m={max_tilt_low:.1f} deg")
     print(f"hover_time_between_12m_and_150m={hover_time:.2f} s")
-    print(f"rebound_after_entering_10m_below_5km={rebound_after_center:.2f} m")
+    # This is sampled at the telemetry period. The plugin's per-physics-frame
+    # acceptance line is authoritative for short rebound peaks.
+    print(
+        "sampled_rebound_after_entering_10m_below_5km="
+        f"{rebound_after_center:.2f} m"
+    )
+    if final_align_entry is not None:
+        print(
+            "final_align_entry "
+            f"hook_height={float(final_align_entry['hook_height']):.2f} m "
+            f"lateral={float(final_align_entry['v_horizontal']):.2f} m/s "
+            f"error={float(final_align_entry['h_error']):.2f} m "
+            f"tilt={float(final_align_entry['tilt']):.1f} deg"
+        )
+    if vertical_capture_entry is not None:
+        print(
+            "vertical_capture_entry "
+            f"hook_height={float(vertical_capture_entry['hook_height']):.2f} m "
+            f"lateral={float(vertical_capture_entry['v_horizontal']):.2f} m/s "
+            f"error={float(vertical_capture_entry['h_error']):.2f} m "
+            f"tilt={float(vertical_capture_entry['tilt']):.1f} deg"
+        )
 
     hints: list[str] = []
     if phase in {
         "RETURN", "TERMINAL", "PID_TERMINAL", "FINAL_ALIGN", "VERTICAL_CAPTURE",
-    } and float(entry["v_vertical"]) < -5:
-        hints.append("terminal descent still fast: start the single ENTRY burn earlier or extend its maximum time")
+    } and float(entry["v_vertical"]) < -6.5:
+        hints.append(
+            "terminal descent is approaching the 7.5 m/s capture limit: "
+            "check the 65 m committed low-fuel handoff before changing the ENTRY burn"
+        )
     if saturated > 0.25:
         hints.append("insufficient control authority: reduce landing mass or use a stronger engine")
     if float(entry["h_error"]) > 8 and float(entry["v_horizontal"]) < 2:
         hints.append("slow lateral convergence: raise H_POS_KP_LOW by 10%")
     if rebound_after_center > 8.0:
-        hints.append("lateral overshoot: enter HORIZONTAL_CORRIDOR_HEIGHT earlier or lower TERMINAL_HORIZONTAL_STOP_ACCEL")
+        if (
+            final_align_entry is not None
+            and (
+                float(final_align_entry["v_horizontal"]) > 1.25
+                or float(final_align_entry["tilt"]) > 8.0
+            )
+        ):
+            hints.append(
+                "energetic final-align handoff: start horizontal final alignment "
+                "earlier without raising FINAL_ALIGN_VERTICAL_CONTROL_HEIGHT"
+            )
+        else:
+            hints.append("lateral overshoot: enter HORIZONTAL_CORRIDOR_HEIGHT earlier or lower TERMINAL_HORIZONTAL_STOP_ACCEL")
+    elif (
+        float(entry["h_error"]) > 50.0
+        and float(entry["v_horizontal"]) > 3.5
+    ):
+        hints.append(
+            "horizontal corridor miss: prevent the latched alignment field "
+            "from re-accelerating an already converging stage"
+        )
     elif float(entry["v_horizontal"]) > 3.5:
         hints.append("final lateral speed high: increase H_VEL_KP only after checking the stopping corridor")
     if float(entry["tilt"]) >= 11.8:

@@ -20,22 +20,22 @@ NET_MAX_LATERAL = 4.0
 NET_HALF_WIDTH = 12.0
 LOW_FUEL_FRACTION = 0.02
 LOW_FUEL_DESCENT_SCALE = 1.28
-LOW_FUEL_CAPTURE_SPEED = 4.0
+LOW_FUEL_CAPTURE_SPEED = 6.0
 RECOVERY_START_FRACTION = 0.20
 DESCENT_MAX_SPEED = 700.0
 TERMINAL_NOMINAL_THRUST_FRACTION = 0.75
 TERMINAL_TOTAL_THRUST_FRACTION = 0.98
 TERMINAL_VELOCITY_CONE = math.radians(30.0)
-TERMINAL_VELOCITY_CONE_MIN_SPEED = 30.0
+TERMINAL_VELOCITY_CONE_MIN_SPEED = 300.0
 TERMINAL_WAYPOINT_HEIGHT = 2000.0
-TERMINAL_WAYPOINT_VERTICAL_SPEED = 180.0
-TERMINAL_HORIZONTAL_PLAN_END_HEIGHT = 5000.0
+TERMINAL_WAYPOINT_VERTICAL_SPEED = 190.0
+TERMINAL_HORIZONTAL_PLAN_END_HEIGHT = 6000.0
 PLAN_POSITION_GAIN = 0.10
 PLAN_VELOCITY_GAIN = 1.50
-PLAN_STOP_ACCEL = 3.0
+PLAN_STOP_ACCEL = 55.0
 MAX_HORIZONTAL_ACCEL = 55.0
 PID_SWITCH_HEIGHT = 18.0
-HORIZONTAL_CORRIDOR_HEIGHT = 13500.0
+HORIZONTAL_CORRIDOR_HEIGHT = 30000.0
 HORIZONTAL_CORRIDOR_RANGE = 30000.0
 CENTERING_HOLD_HEIGHT = 16.0
 CENTERING_HOLD_ERROR = 7.0
@@ -54,25 +54,40 @@ TERMINAL_ACCEL_FILTER = 0.10
 TERMINAL_HIGH_ENERGY_ACCEL_FILTER = 0.45
 FINAL_HORIZONTAL_SPEED = 0.5
 HORIZONTAL_CORRIDOR_SPEED = 150.0
-HORIZONTAL_STOP_ACCEL = 1.0
-HORIZONTAL_DEADBAND = 3.0
+HORIZONTAL_STOP_ACCEL = 0.60
+HORIZONTAL_DEADBAND = 15.0
 HORIZONTAL_VELOCITY_GAIN = 1.0
-HORIZONTAL_ALIGN_RANGE = 300.0
+HORIZONTAL_ALIGN_RANGE = 550.0
 HORIZONTAL_ALIGN_SPEED = 30.0
+HORIZONTAL_ALIGN_MIN_SPEED = 10.0
 HORIZONTAL_ALIGN_POSITION_GAIN = 0.15
 HORIZONTAL_ALIGN_VELOCITY_GAIN = 2.00
-FINAL_ALIGN_HEIGHT = 65.0
-FINAL_ALIGN_RANGE = 100.0
+HORIZONTAL_ALIGN_ACCEL_RANGE_GAIN = 0.75
+HORIZONTAL_ALIGN_ACCEL_VELOCITY_GAIN = 1.00
+HORIZONTAL_ALIGN_SETTLE_ENTRY_SPEED = 13.0
+HORIZONTAL_ALIGN_SETTLE_ENTRY_RANGE = 130.0
+HORIZONTAL_ALIGN_SETTLE_MAX_ACCEL = 25.0
+HORIZONTAL_ALIGN_SETTLE_POSITION_GAIN = 0.20
+HORIZONTAL_ALIGN_SETTLE_VELOCITY_GAIN = 3.5
+HORIZONTAL_ALIGN_REACQUIRE_RANGE = 30.0
+HORIZONTAL_ALIGN_REACQUIRE_POSITION_GAIN = 0.20
+HORIZONTAL_ALIGN_REACQUIRE_MAX_ACCEL = 25.0
+FINAL_ALIGN_HEIGHT = 1000.0
+FINAL_ALIGN_VERTICAL_CONTROL_HEIGHT = 65.0
+FINAL_ALIGN_RANGE = 50.0
 FINAL_ALIGN_HOLD_SECONDS = 0.0
 FINAL_ALIGN_SPEED = 3.0
-FINAL_ALIGN_POSITION_GAIN = 0.05
-FINAL_ALIGN_VELOCITY_GAIN = 0.40
-FINAL_ALIGN_READY_ERROR = 7.0
+FINAL_ALIGN_POSITION_GAIN = 0.08
+FINAL_ALIGN_VELOCITY_GAIN = 0.50
+FINAL_ALIGN_READY_ERROR = 6.0
 FINAL_ALIGN_READY_SPEED = 1.25
 FINAL_ALIGN_READY_TILT = math.radians(8.0)
 FINAL_CAPTURE_VELOCITY_GAIN = 0.40
 FINAL_CAPTURE_MAX_ACCEL = 1.0
-ENTRY_MAX_TILT = 55.0
+FINAL_CAPTURE_POSITION_DEADBAND = 2.0
+FINAL_CAPTURE_POSITION_GAIN = 0.10
+FINAL_CAPTURE_MAX_SPEED = 0.75
+ENTRY_MAX_TILT = 89.0
 LANDING_MAX_TILT = 12.0
 VERTICAL_DRAG_FACTOR = 2.5e-5
 HORIZONTAL_DRAG_FACTOR = 1.5e-4
@@ -82,6 +97,7 @@ TERMINAL_GUIDANCE_START_HEIGHT = 30000.0
 MIDCOURSE_END_MARGIN = 600.0
 MIDCOURSE_PREDICTED_ERROR = 999999999.0
 MIDCOURSE_MAX_HORIZONTAL_ACCEL = 8.0
+TERMINAL_DESCENT_COUPLING_BAND = 50.0
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -134,6 +150,8 @@ def run(case: Case) -> Result:
     integral = 0.0
     was_pid_mode = False
     capture_align_mode = False
+    horizontal_settle_mode = False
+    capture_align_speed_limit = HORIZONTAL_ALIGN_SPEED
     final_align_mode = False
     final_align_started_at = None
     final_descent_armed = False
@@ -263,8 +281,18 @@ def run(case: Case) -> Result:
             sensed_h <= HORIZONTAL_CORRIDOR_HEIGHT
             and error <= HORIZONTAL_CORRIDOR_RANGE
         )
-        if horizontal_corridor_mode and error <= HORIZONTAL_ALIGN_RANGE:
+        if (
+            not capture_align_mode
+            and horizontal_corridor_mode
+            and error <= HORIZONTAL_ALIGN_RANGE
+        ):
             capture_align_mode = True
+            radial_speed = (
+                (sensed_x * sensed_vx + sensed_z * sensed_vz) / error
+                if error > 0.0
+                else 0.0
+            )
+            capture_align_speed_limit = max(HORIZONTAL_ALIGN_MIN_SPEED, radial_speed)
         if (
             not final_align_mode
             and sensed_h <= FINAL_ALIGN_HEIGHT
@@ -370,13 +398,17 @@ def run(case: Case) -> Result:
         )
         ax, az = clamp_vector(ax, az, MAX_HORIZONTAL_ACCEL)
 
-        if horizontal_corridor_mode:
+        if horizontal_corridor_mode and (
+            capture_align_mode or sensed_h <= TERMINAL_WAYPOINT_HEIGHT
+        ):
             stop_range = max(error - HORIZONTAL_DEADBAND, 0.0)
             stop_speed = math.sqrt(2.0 * HORIZONTAL_STOP_ACCEL * stop_range)
             pid_horizontal_speed = min(stop_speed, HORIZONTAL_CORRIDOR_SPEED)
             if capture_align_mode:
                 pid_horizontal_speed = min(
+                    pid_horizontal_speed,
                     HORIZONTAL_ALIGN_SPEED,
+                    capture_align_speed_limit,
                     stop_range * HORIZONTAL_ALIGN_POSITION_GAIN,
                 )
             if error > HORIZONTAL_DEADBAND:
@@ -385,13 +417,52 @@ def run(case: Case) -> Result:
             else:
                 desired_vx, desired_vz = 0.0, 0.0
             velocity_gain = HORIZONTAL_VELOCITY_GAIN
+            acceleration_limit = MAX_HORIZONTAL_ACCEL
             if capture_align_mode:
                 velocity_gain = HORIZONTAL_ALIGN_VELOCITY_GAIN
+                acceleration_limit = max(
+                    HORIZONTAL_STOP_ACCEL,
+                    min(
+                        MAX_HORIZONTAL_ACCEL,
+                        max(
+                            stop_range * HORIZONTAL_ALIGN_ACCEL_RANGE_GAIN,
+                            math.hypot(sensed_vx, sensed_vz)
+                            * HORIZONTAL_ALIGN_ACCEL_VELOCITY_GAIN,
+                        ),
+                    ),
+                )
             ax, az = clamp_vector(
                 (desired_vx - sensed_vx) * velocity_gain,
                 (desired_vz - sensed_vz) * velocity_gain,
-                MAX_HORIZONTAL_ACCEL,
+                acceleration_limit,
             )
+
+        if (
+            not horizontal_settle_mode
+            and capture_align_mode
+            and error <= HORIZONTAL_ALIGN_SETTLE_ENTRY_RANGE
+            and math.hypot(sensed_vx, sensed_vz)
+            <= HORIZONTAL_ALIGN_SETTLE_ENTRY_SPEED
+        ):
+            horizontal_settle_mode = True
+            filtered_ax = 0.0
+            filtered_az = 0.0
+        if horizontal_settle_mode and sensed_h > TERMINAL_WAYPOINT_HEIGHT:
+            ax, az = clamp_vector(
+                sensed_x * HORIZONTAL_ALIGN_SETTLE_POSITION_GAIN
+                - sensed_vx * HORIZONTAL_ALIGN_SETTLE_VELOCITY_GAIN,
+                sensed_z * HORIZONTAL_ALIGN_SETTLE_POSITION_GAIN
+                - sensed_vz * HORIZONTAL_ALIGN_SETTLE_VELOCITY_GAIN,
+                HORIZONTAL_ALIGN_SETTLE_MAX_ACCEL,
+            )
+            if error > HORIZONTAL_ALIGN_REACQUIRE_RANGE:
+                ax, az = clamp_vector(
+                    sensed_x * HORIZONTAL_ALIGN_REACQUIRE_POSITION_GAIN
+                    - sensed_vx * HORIZONTAL_ALIGN_SETTLE_VELOCITY_GAIN,
+                    sensed_z * HORIZONTAL_ALIGN_REACQUIRE_POSITION_GAIN
+                    - sensed_vz * HORIZONTAL_ALIGN_SETTLE_VELOCITY_GAIN,
+                    HORIZONTAL_ALIGN_REACQUIRE_MAX_ACCEL,
+                )
 
         if final_align_mode and not final_descent_armed:
             final_stop_range = error
@@ -440,7 +511,11 @@ def run(case: Case) -> Result:
                 + 0.020 * integral
             )
 
-        if final_align_mode and not final_descent_armed:
+        if (
+            final_align_mode
+            and not final_descent_armed
+            and sensed_h <= FINAL_ALIGN_VERTICAL_CONTROL_HEIGHT
+        ):
             final_target_v = 0.0
             assert final_align_started_at is not None
             if fuel_urgent:
@@ -456,10 +531,39 @@ def run(case: Case) -> Result:
                 + 0.020 * integral
             )
 
+        if (
+            final_descent_armed
+            and fuel_urgent
+            and not pid_mode
+            and sensed_h <= FINAL_ALIGN_VERTICAL_CONTROL_HEIGHT
+        ):
+            committed_fuel_target_v = -LOW_FUEL_CAPTURE_SPEED
+            integral = clamp(
+                integral + (committed_fuel_target_v - sensed_vv) * DT,
+                -10.0,
+                10.0,
+            )
+            vertical_thrust_command = (
+                G
+                + 2.00 * (committed_fuel_target_v - sensed_vv)
+                + 0.020 * integral
+            )
+
         if final_descent_armed:
+            desired_vx = 0.0
+            desired_vz = 0.0
+            final_capture_range = math.hypot(sensed_x, sensed_z)
+            if final_capture_range > FINAL_CAPTURE_POSITION_DEADBAND:
+                final_capture_speed = min(
+                    FINAL_CAPTURE_MAX_SPEED,
+                    (final_capture_range - FINAL_CAPTURE_POSITION_DEADBAND)
+                    * FINAL_CAPTURE_POSITION_GAIN,
+                )
+                desired_vx = sensed_x / final_capture_range * final_capture_speed
+                desired_vz = sensed_z / final_capture_range * final_capture_speed
             ax, az = clamp_vector(
-                -sensed_vx * FINAL_CAPTURE_VELOCITY_GAIN,
-                -sensed_vz * FINAL_CAPTURE_VELOCITY_GAIN,
+                (desired_vx - sensed_vx) * FINAL_CAPTURE_VELOCITY_GAIN,
+                (desired_vz - sensed_vz) * FINAL_CAPTURE_VELOCITY_GAIN,
                 FINAL_CAPTURE_MAX_ACCEL,
             )
 
@@ -498,8 +602,21 @@ def run(case: Case) -> Result:
             required_vertical_for_tilt = math.hypot(ax, az) / max(
                 math.tan(tilt_limit), 0.01
             )
+            coupling_min_down_speed = TERMINAL_WAYPOINT_VERTICAL_SPEED * max(
+                sensed_h / TERMINAL_WAYPOINT_HEIGHT, 1.0
+            ) ** 0.25
+            coupling_blend = clamp(
+                (-sensed_vv - coupling_min_down_speed)
+                / TERMINAL_DESCENT_COUPLING_BAND,
+                0.0,
+                1.0,
+            )
+            coupled_vertical_thrust = vertical_thrust_command + (
+                max(vertical_thrust_command, required_vertical_for_tilt)
+                - vertical_thrust_command
+            ) * coupling_blend
             vertical_thrust_command = min(
-                max(vertical_thrust_command, required_vertical_for_tilt),
+                coupled_vertical_thrust,
                 case.available_accel * TERMINAL_NOMINAL_THRUST_FRACTION,
             )
         max_horizontal_accel = max(vertical_thrust_command, G * 0.2) * math.tan(tilt_limit)
