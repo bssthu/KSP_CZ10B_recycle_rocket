@@ -16,10 +16,15 @@ IF SHIP:PARTSNAMED("CZ10B-RecoveryPlatform"):LENGTH > 0 {
     SET RECOVERY_SHIP TO TARGET.
     SET AUTOMATED_DEPLOYMENT TO TRUE.
 } ELSE {
+    IF NOT HASTARGET {
+        // After the mission rail separates, kOS can boot several seconds before
+        // the observer switches back to the booster and binds the platform.
+        // LIST VESSELS is not safe during that unpack/switch window, so give the
+        // automated handoff time to finish before using the manual-run fallback.
+        LOCAL TARGET_BIND_TIMEOUT IS TIME:SECONDS + 12.
+        WAIT UNTIL HASTARGET OR TIME:SECONDS >= TARGET_BIND_TIMEOUT.
+    }
     IF HASTARGET {
-        // On a slow first physics frame the observer may have already separated
-        // the rail and bound the platform before this boot program starts. Reuse
-        // that target instead of enumerating vessels while one is unpacking.
         SET RECOVERY_SHIP TO TARGET.
         SET AUTOMATED_DEPLOYMENT TO TRUE.
     } ELSE {
@@ -47,7 +52,15 @@ IF NOT AUTOMATED_DEPLOYMENT AND NOT HASTARGET {
     SET TARGET TO RECOVERY_SHIP.
 }
 LOCAL MISSION_ID IS ROUND(TIME:SECONDS,0).
-LOG "mission,phase,ut,altitude,hook_height,v_vertical,v_horizontal,h_error,throttle,tilt,mass,max_thrust"
+LOG "mission,phase,ut,altitude,hook_height,v_vertical,v_horizontal,h_error,throttle,tilt,mass,max_thrust,actual_tilt"
+    TO "0:/cz10b/telemetry.csv".
+// Limit the 80 kN-m terminal wheel to the original 20 kN-m through the
+// high-energy flight. Full authority is enabled only after main cutoff.
+LOCAL BOOSTER_WHEEL_LIMITED IS
+    SET_BOOSTER_REACTION_WHEEL_AUTHORITY(
+        BOOSTER_FLIGHT_REACTION_WHEEL_AUTHORITY).
+LOG MISSION_ID + ",WHEEL_LIMIT," + ROUND(TIME:SECONDS,3)
+    + ",limited=" + BOOSTER_WHEEL_LIMITED
     TO "0:/cz10b/telemetry.csv".
 
 SAS OFF.
@@ -156,6 +169,10 @@ UNTIL BOOSTER_PROPELLANT_FRACTION() <= ASCENT_RESERVE_FRACTION
 }
 
 LOCK THROTTLE TO 0.
+// Cooked throttle overrides the pilot setting while kOS is healthy.  Zero the
+// persistent pilot throttle as well so an unexpected processor abort returns
+// to cutoff instead of restoring the ascent command.
+SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
 // The cable net owns the vehicle after all four hooks latch.  Leaving the kOS
 // steering manager active makes the reaction wheels fight the compliant
 // tethers, producing a periodic captured-stage sway even with zero throttle.
@@ -279,16 +296,14 @@ LOCK THROTTLE TO 0.
 LOCK STEERING TO LOOKDIRUP(-SHIP:VELOCITY:SURFACE:NORMALIZED,
     SHIP:UP:VECTOR).
 
-// 2) Below 40 km, use a retrograde safety burn only if horizontal speed exceeds
-// the configured entry ceiling.  The flight value is 1500 m/s, so the nominal
-// trajectory preserves vertical energy and propellant for the efficient,
-// height-indexed lateral stop beginning at 30 km.
+// 2) At 30 km, perform one thermal/load-reduction burn.  Its only velocity
+// objective is the surface-horizontal gate; reaching that gate always cuts the
+// throttle instead of flowing directly into the landing burn.
 WAIT UNTIL SHIP:ALTITUDE <= ENTRY_DECEL_HEIGHT.
-PRINT "40 KM RETROGRADE ENTRY BURN" AT(0,11).
+PRINT "30 KM THERMAL ENTRY BURN" AT(0,11).
 LOCAL ENTRY_H_SPEED IS VXCL(SHIP:UP:VECTOR:NORMALIZED,
     SHIP:VELOCITY:SURFACE):MAG.
-UNTIL ENTRY_H_SPEED <= ENTRY_HORIZONTAL_SPEED
-      OR SHIP:ALTITUDE <= TERMINAL_GUIDANCE_START_HEIGHT {
+UNTIL ENTRY_H_SPEED <= ENTRY_HORIZONTAL_SPEED {
     LOCK STEERING TO LOOKDIRUP(-SHIP:VELOCITY:SURFACE:NORMALIZED,
         SHIP:UP:VECTOR).
     LOCK THROTTLE TO 1.
@@ -303,25 +318,97 @@ UNTIL ENTRY_H_SPEED <= ENTRY_HORIZONTAL_SPEED
     WAIT 0.02.
 }
 LOCK THROTTLE TO 0.
-UNTIL SHIP:ALTITUDE <= TERMINAL_GUIDANCE_START_HEIGHT {
-    LOCK STEERING TO LOOKDIRUP(-SHIP:VELOCITY:SURFACE:NORMALIZED,
-        SHIP:UP:VECTOR).
-    WAIT 0.02.
+// Audit the zero-throttle handoff against a ballistic 2 km footprint.  A large
+// miss is not hidden by extending the entry burn; the discrete checkpoints
+// below own any correction and make the source of the error visible in logs.
+LOCAL ENTRY_UP IS SHIP:UP:VECTOR:NORMALIZED.
+LOCAL ENTRY_REL_POS IS NET_POSITION(RECOVERY_SHIP) - SHIP:POSITION.
+LOCAL ENTRY_HOOK_HEIGHT IS -VDOT(ENTRY_REL_POS, ENTRY_UP)
+    + BOOSTER_HOOK_OFFSET_ALONG_UP(ENTRY_UP).
+LOCAL ENTRY_VERTICAL_V IS VDOT(SHIP:VELOCITY:SURFACE, ENTRY_UP).
+LOCAL ENTRY_H_VEL IS VXCL(ENTRY_UP, SHIP:VELOCITY:SURFACE).
+LOCAL ENTRY_G IS SHIP:BODY:MU
+    / ((SHIP:BODY:RADIUS + SHIP:ALTITUDE)^2).
+LOCAL ENTRY_NOMINAL_ACCEL IS SHIP:AVAILABLETHRUST
+    / MAX(SHIP:MASS, 0.001) * TERMINAL_NOMINAL_THRUST_FRACTION.
+LOCAL ENTRY_BURN_DV_VERTICAL IS -TERMINAL_WAYPOINT_VERTICAL_SPEED
+    - ENTRY_VERTICAL_V.
+LOCAL ENTRY_BURN_DV IS -ENTRY_H_VEL
+    + ENTRY_UP * ENTRY_BURN_DV_VERTICAL.
+LOCAL ENTRY_BURN_A IS ENTRY_G^2 - ENTRY_NOMINAL_ACCEL^2.
+LOCAL ENTRY_BURN_B IS 2 * ENTRY_G * ENTRY_BURN_DV_VERTICAL.
+LOCAL ENTRY_BURN_C IS ENTRY_BURN_DV:MAG^2.
+LOCAL ENTRY_BURN_TIME IS 999.
+IF ENTRY_BURN_A < -0.001 {
+    LOCAL ENTRY_BURN_DISC IS MAX(ENTRY_BURN_B^2
+        - 4 * ENTRY_BURN_A * ENTRY_BURN_C, 0).
+    SET ENTRY_BURN_TIME TO MAX((-ENTRY_BURN_B - SQRT(ENTRY_BURN_DISC))
+        / (2 * ENTRY_BURN_A), 0).
 }
-LOCK STEERING TO UP.
-PRINT "30 KM CONSTRAINED TRAJECTORY" AT(0,11).
-// GFOLD's minimum-time phase is approximated here by a live suicide-burn gate.
-// Measured unpowered acceleration includes KSP's current atmospheric drag, so
-// the gate moves lower as the airframe decelerates instead of assuming vacuum.
+LOCAL ENTRY_PLANNED_BURN_TIME IS ENTRY_BURN_TIME
+    + TERMINAL_GUIDANCE_RESPONSE_SECONDS.
+LOCAL ENTRY_BURN_DROP IS MAX(-(ENTRY_VERTICAL_V
+    - TERMINAL_WAYPOINT_VERTICAL_SPEED) * 0.5
+    * ENTRY_PLANNED_BURN_TIME, 0).
+LOCAL ENTRY_IGNITION_HEIGHT IS TERMINAL_WAYPOINT_HEIGHT
+    + ENTRY_BURN_DROP * TERMINAL_IGNITION_SAFETY
+    + TERMINAL_IGNITION_MARGIN.
+LOCAL ENTRY_COAST_TGO IS 0.
+IF ENTRY_HOOK_HEIGHT > ENTRY_IGNITION_HEIGHT {
+    SET ENTRY_COAST_TGO TO COAST_TIME_TO_HEIGHT(ENTRY_HOOK_HEIGHT,
+        ENTRY_VERTICAL_V, ENTRY_IGNITION_HEIGHT, ENTRY_G).
+}
+LOCAL ENTRY_IGNITION_VERTICAL_V IS ENTRY_VERTICAL_V
+    - ENTRY_G * ENTRY_COAST_TGO.
+LOCAL ENTRY_BURN_NET_VERTICAL_ACCEL IS
+    (-TERMINAL_WAYPOINT_VERTICAL_SPEED - ENTRY_IGNITION_VERTICAL_V)
+    / MAX(ENTRY_PLANNED_BURN_TIME, 0.1).
+LOCAL ENTRY_HORIZONTAL_BURN_DROP IS MAX(ENTRY_IGNITION_HEIGHT
+    - TERMINAL_HORIZONTAL_PLAN_END_HEIGHT, 0).
+LOCAL ENTRY_HORIZONTAL_BURN_TIME IS ENTRY_HORIZONTAL_BURN_DROP
+    / MAX(-ENTRY_IGNITION_VERTICAL_V, 1).
+IF ENTRY_BURN_NET_VERTICAL_ACCEL > 0.001 {
+    LOCAL ENTRY_HORIZONTAL_TIME_DISC IS MAX(ENTRY_IGNITION_VERTICAL_V^2
+        - 2 * ENTRY_BURN_NET_VERTICAL_ACCEL
+            * ENTRY_HORIZONTAL_BURN_DROP, 0).
+    SET ENTRY_HORIZONTAL_BURN_TIME TO
+        (-ENTRY_IGNITION_VERTICAL_V
+            - SQRT(ENTRY_HORIZONTAL_TIME_DISC))
+        / ENTRY_BURN_NET_VERTICAL_ACCEL.
+}
+SET ENTRY_HORIZONTAL_BURN_TIME TO CLAMP(ENTRY_HORIZONTAL_BURN_TIME,
+    0, ENTRY_PLANNED_BURN_TIME).
+LOCAL ENTRY_APPROACH_OFFSET IS V(0,0,0).
+IF ENTRY_H_VEL:MAG > 0.1 {
+    SET ENTRY_APPROACH_OFFSET TO ENTRY_H_VEL:NORMALIZED
+        * TERMINAL_WAYPOINT_APPROACH_OFFSET.
+}
+LOCAL ENTRY_PREDICTED_MISS IS VXCL(ENTRY_UP, ENTRY_REL_POS)
+    - ENTRY_H_VEL * (ENTRY_COAST_TGO
+        + 0.5 * (ENTRY_HORIZONTAL_BURN_TIME
+            + TERMINAL_HORIZONTAL_FOOTPRINT_LAG_SECONDS))
+    - ENTRY_APPROACH_OFFSET.
+WRITE_TELEMETRY("ENTRY_CUTOFF", MISSION_ID, SHIP:ALTITUDE,
+    ENTRY_HOOK_HEIGHT, ENTRY_VERTICAL_V, ENTRY_H_VEL:MAG,
+    ENTRY_PREDICTED_MISS:MAG, 0, 0).
+PRINT "ENTRY CUTOFF / COAST" AT(0,11).
+PRINT "h-speed / miss " + ROUND(ENTRY_H_VEL:MAG,0) + " / "
+    + ROUND(ENTRY_PREDICTED_MISS:MAG,0) + " m" AT(0,12).
+
+// Coast after the thermal burn.  Three altitude checkpoints may each issue
+// one short horizontal-only correction pulse.  Main ignition is calculated
+// from the full velocity change to the 2 km waypoint at exactly 75% thrust.
 LOCAL BALLISTIC_PREVIOUS_TIME IS TIME:SECONDS.
 LOCAL BALLISTIC_PREVIOUS_V IS SHIP:VELOCITY:SURFACE.
 LOCAL FILTERED_VERTICAL_DRAG IS 0.
 LOCAL FILTERED_HORIZONTAL_DRAG IS V(0,0,0).
-// Start trajectory shaping at 30 km. Throttle remains demand-driven: the
-// vertical braking component is capped at 75%, while only measured trajectory
-// error can use the remaining vector authority up to 98%.
-LOCAL TERMINAL_IGNITION IS TRUE.
-LOCAL BALLISTIC_WAS_POWERED IS FALSE.
+LOCAL TERMINAL_IGNITION IS FALSE.
+LOCAL BALLISTIC_WAS_POWERED IS TRUE.
+LOCAL MIDCOURSE_CHECKPOINT_INDEX IS 0.
+LOCAL MIDCOURSE_PULSE_ACTIVE IS FALSE.
+LOCAL MIDCOURSE_PULSE_END IS -1.
+LOCAL MIDCOURSE_PULSE_START_HEIGHT IS -1.
+LOCAL MIDCOURSE_PULSE_START_H_VEL IS V(0,0,0).
 SET LAST_LOG TO TIME:SECONDS.
 UNTIL TERMINAL_IGNITION {
     LOCAL BALLISTIC_NOW IS TIME:SECONDS.
@@ -357,30 +444,137 @@ UNTIL TERMINAL_IGNITION {
 
     LOCAL BALLISTIC_AVAILABLE_ACCEL IS SHIP:AVAILABLETHRUST
         / MAX(SHIP:MASS, 0.001).
-    LOCAL BALLISTIC_NET_DECEL IS MAX(BALLISTIC_AVAILABLE_ACCEL
-        * TERMINAL_NOMINAL_THRUST_FRACTION
-        - BALLISTIC_G + FILTERED_VERTICAL_DRAG, 0.1).
-    LOCAL BALLISTIC_STOP_DISTANCE IS MAX(BALLISTIC_VERTICAL_V^2
-        - CAPTURE_FINAL_SPEED^2, 0) / (2 * BALLISTIC_NET_DECEL)
-        * STOP_DISTANCE_SAFETY.
+    // Solve |delta_v / t + g_up| = nominal_acceleration.  This includes both
+    // the horizontal stop and the requested vertical 2 km state, unlike the
+    // old vertical-only stop distance to the net plane.
     LOCAL EFFECTIVE_G IS MAX(BALLISTIC_G - FILTERED_VERTICAL_DRAG, 1).
-    LOCAL BALLISTIC_TGO IS COAST_TIME_TO_HEIGHT(BALLISTIC_HEIGHT,
-        BALLISTIC_VERTICAL_V, 0, EFFECTIVE_G).
-    LOCAL PREDICTED_DISPLACEMENT IS BALLISTIC_H_VEL * BALLISTIC_TGO
-        + FILTERED_HORIZONTAL_DRAG * (0.5 * BALLISTIC_TGO^2).
-    LOCAL PREDICTED_MISS IS BALLISTIC_H_POS - PREDICTED_DISPLACEMENT.
-    // Below 15 km, correct only the predicted footprint error.  The desired
-    // velocity remains range/time-to-go rather than zero, so the stage keeps
-    // moving downrange until the late powered descent.
-    LOCAL MIDCOURSE_ACTIVE IS BALLISTIC_HEIGHT <= MIDCOURSE_START_HEIGHT
-        AND BALLISTIC_HEIGHT > BALLISTIC_STOP_DISTANCE + MIDCOURSE_END_MARGIN
-        AND PREDICTED_MISS:MAG > MIDCOURSE_PREDICTED_ERROR.
+    LOCAL NOMINAL_BURN_ACCEL IS BALLISTIC_AVAILABLE_ACCEL
+        * TERMINAL_NOMINAL_THRUST_FRACTION.
+    LOCAL BURN_DV_VERTICAL IS -TERMINAL_WAYPOINT_VERTICAL_SPEED
+        - BALLISTIC_VERTICAL_V.
+    LOCAL BURN_DV IS -BALLISTIC_H_VEL
+        + BALLISTIC_UP * BURN_DV_VERTICAL.
+    LOCAL BURN_QUADRATIC_A IS EFFECTIVE_G^2 - NOMINAL_BURN_ACCEL^2.
+    LOCAL BURN_QUADRATIC_B IS 2 * EFFECTIVE_G * BURN_DV_VERTICAL.
+    LOCAL BURN_QUADRATIC_C IS BURN_DV:MAG^2.
+    LOCAL NOMINAL_BURN_TIME IS 999.
+    IF BURN_QUADRATIC_A < -0.001 {
+        LOCAL BURN_DISCRIMINANT IS MAX(BURN_QUADRATIC_B^2
+            - 4 * BURN_QUADRATIC_A * BURN_QUADRATIC_C, 0).
+        SET NOMINAL_BURN_TIME TO MAX((-BURN_QUADRATIC_B
+            - SQRT(BURN_DISCRIMINANT)) / (2 * BURN_QUADRATIC_A), 0).
+    }
+    LOCAL PLANNED_BURN_TIME IS NOMINAL_BURN_TIME
+        + TERMINAL_GUIDANCE_RESPONSE_SECONDS.
+    LOCAL NOMINAL_BURN_DROP IS MAX(-(BALLISTIC_VERTICAL_V
+        - TERMINAL_WAYPOINT_VERTICAL_SPEED) * 0.5
+        * PLANNED_BURN_TIME, 0).
+    LOCAL BALLISTIC_IGNITION_HEIGHT IS TERMINAL_WAYPOINT_HEIGHT
+        + NOMINAL_BURN_DROP * TERMINAL_IGNITION_SAFETY
+        + TERMINAL_IGNITION_MARGIN.
+    // Predict the complete coast-plus-burn footprint, not the old ballistic
+    // impact point.  At constant acceleration a burn ending at zero horizontal
+    // speed covers half of its ignition horizontal velocity times burn time.
+    LOCAL BALLISTIC_COAST_TGO IS 0.
+    IF BALLISTIC_HEIGHT > BALLISTIC_IGNITION_HEIGHT {
+        SET BALLISTIC_COAST_TGO TO COAST_TIME_TO_HEIGHT(BALLISTIC_HEIGHT,
+            BALLISTIC_VERTICAL_V, BALLISTIC_IGNITION_HEIGHT, EFFECTIVE_G).
+    }
+    LOCAL PREDICTED_IGNITION_H_VEL IS BALLISTIC_H_VEL
+        + FILTERED_HORIZONTAL_DRAG * BALLISTIC_COAST_TGO.
+    LOCAL PREDICTED_IGNITION_VERTICAL_V IS BALLISTIC_VERTICAL_V
+        - EFFECTIVE_G * BALLISTIC_COAST_TGO.
+    LOCAL PREDICTED_BURN_NET_VERTICAL_ACCEL IS
+        (-TERMINAL_WAYPOINT_VERTICAL_SPEED
+            - PREDICTED_IGNITION_VERTICAL_V)
+        / MAX(PLANNED_BURN_TIME, 0.1).
+    LOCAL PREDICTED_HORIZONTAL_BURN_DROP IS MAX(
+        BALLISTIC_IGNITION_HEIGHT
+            - TERMINAL_HORIZONTAL_PLAN_END_HEIGHT, 0).
+    LOCAL PREDICTED_HORIZONTAL_BURN_TIME IS
+        PREDICTED_HORIZONTAL_BURN_DROP
+        / MAX(-PREDICTED_IGNITION_VERTICAL_V, 1).
+    IF PREDICTED_BURN_NET_VERTICAL_ACCEL > 0.001 {
+        LOCAL PREDICTED_HORIZONTAL_TIME_DISC IS MAX(
+            PREDICTED_IGNITION_VERTICAL_V^2
+            - 2 * PREDICTED_BURN_NET_VERTICAL_ACCEL
+                * PREDICTED_HORIZONTAL_BURN_DROP, 0).
+        SET PREDICTED_HORIZONTAL_BURN_TIME TO
+            (-PREDICTED_IGNITION_VERTICAL_V
+                - SQRT(PREDICTED_HORIZONTAL_TIME_DISC))
+            / PREDICTED_BURN_NET_VERTICAL_ACCEL.
+    }
+    SET PREDICTED_HORIZONTAL_BURN_TIME TO CLAMP(
+        PREDICTED_HORIZONTAL_BURN_TIME, 0, PLANNED_BURN_TIME).
+    LOCAL PREDICTED_APPROACH_OFFSET IS V(0,0,0).
+    IF PREDICTED_IGNITION_H_VEL:MAG > 0.1 {
+        SET PREDICTED_APPROACH_OFFSET TO
+            PREDICTED_IGNITION_H_VEL:NORMALIZED
+            * TERMINAL_WAYPOINT_APPROACH_OFFSET.
+    }
+    LOCAL PREDICTED_DISPLACEMENT IS BALLISTIC_H_VEL
+            * BALLISTIC_COAST_TGO
+        + FILTERED_HORIZONTAL_DRAG
+            * (0.5 * BALLISTIC_COAST_TGO^2)
+        + PREDICTED_IGNITION_H_VEL
+            * (0.5 * (PREDICTED_HORIZONTAL_BURN_TIME
+                + TERMINAL_HORIZONTAL_FOOTPRINT_LAG_SECONDS)).
+    LOCAL PREDICTED_MISS IS BALLISTIC_H_POS - PREDICTED_DISPLACEMENT
+        - PREDICTED_APPROACH_OFFSET.
+
+    LOCAL NEXT_MIDCOURSE_HEIGHT IS -1.
+    IF MIDCOURSE_CHECKPOINT_INDEX = 0 {
+        SET NEXT_MIDCOURSE_HEIGHT TO MIDCOURSE_CHECKPOINT_1_HEIGHT.
+    } ELSE IF MIDCOURSE_CHECKPOINT_INDEX = 1 {
+        SET NEXT_MIDCOURSE_HEIGHT TO MIDCOURSE_CHECKPOINT_2_HEIGHT.
+    } ELSE IF MIDCOURSE_CHECKPOINT_INDEX = 2 {
+        SET NEXT_MIDCOURSE_HEIGHT TO MIDCOURSE_CHECKPOINT_3_HEIGHT.
+    }
+    IF NOT MIDCOURSE_PULSE_ACTIVE AND NEXT_MIDCOURSE_HEIGHT > 0
+        AND BALLISTIC_HEIGHT <= NEXT_MIDCOURSE_HEIGHT {
+        WRITE_TELEMETRY("TRAJECTORY_CHECK", MISSION_ID, SHIP:ALTITUDE,
+            BALLISTIC_HEIGHT, BALLISTIC_VERTICAL_V,
+            BALLISTIC_H_VEL:MAG, PREDICTED_MISS:MAG, 0, 0).
+        IF PREDICTED_MISS:MAG > MIDCOURSE_PREDICTED_ERROR
+            AND BALLISTIC_HEIGHT > BALLISTIC_IGNITION_HEIGHT {
+            SET MIDCOURSE_PULSE_ACTIVE TO TRUE.
+            SET MIDCOURSE_PULSE_END TO BALLISTIC_NOW
+                + MIDCOURSE_PULSE_SECONDS.
+            SET MIDCOURSE_PULSE_START_HEIGHT TO BALLISTIC_HEIGHT.
+            SET MIDCOURSE_PULSE_START_H_VEL TO BALLISTIC_H_VEL.
+            PRINT "CHECKPOINT CORRECTION "
+                + (MIDCOURSE_CHECKPOINT_INDEX + 1) AT(0,11).
+        } ELSE {
+            SET MIDCOURSE_CHECKPOINT_INDEX TO
+                MIDCOURSE_CHECKPOINT_INDEX + 1.
+        }
+    }
+    IF MIDCOURSE_PULSE_ACTIVE
+        AND (BALLISTIC_NOW >= MIDCOURSE_PULSE_END
+            OR PREDICTED_MISS:MAG <= MIDCOURSE_PREDICTED_ERROR
+            OR (BALLISTIC_H_VEL
+                - MIDCOURSE_PULSE_START_H_VEL):MAG
+                >= MIDCOURSE_MAX_DELTA_V
+            OR BALLISTIC_HEIGHT <= MIDCOURSE_PULSE_START_HEIGHT
+                - MIDCOURSE_MAX_HEIGHT_DROP
+            OR BOOSTER_PROPELLANT_FRACTION()
+                <= MIDCOURSE_MIN_FUEL_FRACTION) {
+        SET MIDCOURSE_PULSE_ACTIVE TO FALSE.
+        SET MIDCOURSE_CHECKPOINT_INDEX TO MIDCOURSE_CHECKPOINT_INDEX + 1.
+    }
+    LOCAL MIDCOURSE_ACTIVE IS MIDCOURSE_PULSE_ACTIVE
+        AND BALLISTIC_HEIGHT > BALLISTIC_IGNITION_HEIGHT.
     LOCAL MIDCOURSE_THROTTLE IS 0.
     LOCAL MIDCOURSE_TILT IS 0.
     IF MIDCOURSE_ACTIVE {
+        // Include both the remaining coast and the powered footprint.  The old
+        // checkpoint branch referenced the removed BALLISTIC_TGO variable and
+        // aborted kOS on its first real correction pulse.
+        LOCAL MIDCOURSE_TGO IS MAX(BALLISTIC_COAST_TGO
+            + PLANNED_BURN_TIME, 1).
         LOCAL MIDCOURSE_DESIRED_H_VEL IS (BALLISTIC_H_POS
-            - FILTERED_HORIZONTAL_DRAG * (0.5 * BALLISTIC_TGO^2))
-            / MAX(BALLISTIC_TGO, 1).
+            - FILTERED_HORIZONTAL_DRAG * (0.5 * MIDCOURSE_TGO^2))
+            / MIDCOURSE_TGO.
         LOCAL MIDCOURSE_H_ACCEL IS CLAMPV((MIDCOURSE_DESIRED_H_VEL
             - BALLISTIC_H_VEL) * MIDCOURSE_VELOCITY_GAIN,
             MIDCOURSE_MAX_HORIZONTAL_ACCEL).
@@ -390,21 +584,54 @@ UNTIL TERMINAL_IGNITION {
             * MIDCOURSE_VERTICAL_THRUST + MIDCOURSE_H_ACCEL.
         SET MIDCOURSE_THROTTLE TO CLAMP(SHIP:MASS
             * MIDCOURSE_THRUST:MAG / MAX(SHIP:AVAILABLETHRUST, 0.001),
-            0, 1).
+            0, MIDCOURSE_MAX_THROTTLE).
         SET MIDCOURSE_TILT TO VANG(MIDCOURSE_THRUST, BALLISTIC_UP).
         LOCK STEERING TO LOOKDIRUP(MIDCOURSE_THRUST,
             SHIP:FACING:TOPVECTOR).
         LOCK THROTTLE TO MIDCOURSE_THROTTLE.
     } ELSE {
-        LOCK STEERING TO UP.
+        // The last checkpoint owns translation only.  Once it is complete,
+        // use the remaining coast to settle the long stage onto the solved
+        // 75% burn vector.  Starting the burn upright produced a measured
+        // 2.5-3 s vertical bias while the attitude caught up.
+        LOCAL PREALIGN_VERTICAL_THRUST IS EFFECTIVE_G
+            + (-TERMINAL_WAYPOINT_VERTICAL_SPEED
+                - PREDICTED_IGNITION_VERTICAL_V)
+                / MAX(PLANNED_BURN_TIME, 0.1).
+        LOCAL PREALIGN_THRUST IS -PREDICTED_IGNITION_H_VEL
+                / MAX(PLANNED_BURN_TIME, 0.1)
+            + BALLISTIC_UP * MAX(PREALIGN_VERTICAL_THRUST, 0.1).
+        IF MIDCOURSE_CHECKPOINT_INDEX >= 3
+            AND BALLISTIC_HEIGHT <= TERMINAL_MAIN_PREALIGN_HEIGHT
+            AND BALLISTIC_HEIGHT > BALLISTIC_IGNITION_HEIGHT {
+            LOCK STEERING TO LOOKDIRUP(PREALIGN_THRUST,
+                SHIP:FACING:TOPVECTOR).
+        } ELSE {
+            LOCK STEERING TO UP.
+        }
         LOCK THROTTLE TO 0.
     }
-    // Thirty kilometres is the planning handover, not an instruction to hold
-    // thrust all the way down.  Coast along the predicted footprint and begin
-    // the fixed powered trajectory only at the measured suicide-burn gate.
+    // A vertical-only ignition gate was 2-3 km late in real flight: at 8.8 km
+    // the measured horizontal velocity already required more stopping distance
+    // than remained to the ship.  Solve the horizontal component of the same
+    // 75% vector and include the measured attitude response explicitly.
+    LOCAL BALLISTIC_MAIN_VERTICAL_THRUST IS EFFECTIVE_G
+        + BURN_DV_VERTICAL / MAX(PLANNED_BURN_TIME, 0.1).
+    LOCAL BALLISTIC_MAIN_HORIZONTAL_ACCEL IS SQRT(MAX(
+        NOMINAL_BURN_ACCEL^2 - BALLISTIC_MAIN_VERTICAL_THRUST^2, 1)).
+    LOCAL BALLISTIC_HORIZONTAL_STOP_DISTANCE IS
+        (BALLISTIC_H_VEL:MAG
+                * TERMINAL_MAIN_ATTITUDE_RESPONSE_SECONDS
+            + BALLISTIC_H_VEL:MAG^2
+                / (2 * BALLISTIC_MAIN_HORIZONTAL_ACCEL))
+            * TERMINAL_MAIN_HORIZONTAL_STOP_SAFETY.
+    LOCAL BALLISTIC_HORIZONTAL_IGNITION IS BALLISTIC_H_POS:MAG
+        <= BALLISTIC_HORIZONTAL_STOP_DISTANCE
+            + TERMINAL_WAYPOINT_APPROACH_OFFSET.
+    // A checkpoint pulse never delays either solved main-burn gate.
     SET TERMINAL_IGNITION TO BALLISTIC_VERTICAL_V < 0
-        AND BALLISTIC_HEIGHT <= BALLISTIC_STOP_DISTANCE
-            + BURN_ALTITUDE_MARGIN.
+        AND (BALLISTIC_HEIGHT <= BALLISTIC_IGNITION_HEIGHT
+            OR BALLISTIC_HORIZONTAL_IGNITION).
 
     IF BALLISTIC_NOW - LAST_LOG >= TELEMETRY_PERIOD {
         LOCAL BALLISTIC_PHASE IS "BALLISTIC".
@@ -416,8 +643,8 @@ UNTIL TERMINAL_IGNITION {
         SET LAST_LOG TO BALLISTIC_NOW.
     }
     PRINT "ballistic h  " + ROUND(BALLISTIC_HEIGHT,0) + " m    " AT(0,12).
-    PRINT "stop gate    " + ROUND(BALLISTIC_STOP_DISTANCE
-        + BURN_ALTITUDE_MARGIN,0) + " m    " AT(0,13).
+    PRINT "ignition gate" + ROUND(BALLISTIC_IGNITION_HEIGHT,0)
+        + " m    " AT(0,13).
     PRINT "impact miss  " + ROUND(PREDICTED_MISS:MAG,0) + " m    " AT(0,14).
     SET BALLISTIC_PREVIOUS_TIME TO BALLISTIC_NOW.
     SET BALLISTIC_PREVIOUS_V TO SHIP:VELOCITY:SURFACE.
@@ -425,11 +652,10 @@ UNTIL TERMINAL_IGNITION {
     WAIT 0.02.
 }
 
-// Build one constrained, height-indexed trajectory from the measured 30 km
-// state.  The stage follows this path directly; it does not move the aim point
-// or restart a time-to-go solution after each small tracking error.  Only the
-// final frame entrance uses local damping.
-PRINT "FIXED-TRAJECTORY BURN" AT(0,11).
+// Build one constrained, height-indexed trajectory from the solved ignition
+// state.  The 75% main burn follows it to the 2 km waypoint; only the final
+// frame entrance uses local damping.
+PRINT "75% MAIN TRAJECTORY BURN" AT(0,11).
 LOCAL VERTICAL_INTEGRAL IS 0.
 LOCAL PREVIOUS_TIME IS TIME:SECONDS.
 LOCAL PLAN_UP IS SHIP:UP:VECTOR:NORMALIZED.
@@ -440,9 +666,21 @@ LOCAL PLAN_REL_VEL IS SHIP:VELOCITY:SURFACE.
 LOCAL PLAN_VERTICAL_V IS VDOT(PLAN_REL_VEL, PLAN_UP).
 LOCAL PLAN_H_POS IS VXCL(PLAN_UP, PLAN_REL_POS).
 LOCAL PLAN_H_VEL IS VXCL(PLAN_UP, PLAN_REL_VEL).
+LOCAL PLAN_APPROACH_OFFSET IS V(0,0,0).
+IF PLAN_H_VEL:MAG > 0.1 {
+    SET PLAN_APPROACH_OFFSET TO PLAN_H_VEL:NORMALIZED
+        * TERMINAL_WAYPOINT_APPROACH_OFFSET.
+} ELSE IF PLAN_H_POS:MAG > 0.1 {
+    SET PLAN_APPROACH_OFFSET TO PLAN_H_POS:NORMALIZED
+        * TERMINAL_WAYPOINT_APPROACH_OFFSET.
+}
+LOCAL PLAN_CONTROL_H_POS IS PLAN_H_POS - PLAN_APPROACH_OFFSET.
+LOCAL PLAN_HORIZONTAL_END_HEIGHT IS MIN(
+    TERMINAL_HORIZONTAL_PLAN_END_HEIGHT,
+    MAX(TERMINAL_WAYPOINT_HEIGHT, PLAN_HOOK_HEIGHT - 500)).
 LOCAL PLAN_PROGRESS_RATE0 IS MAX(-PLAN_VERTICAL_V,
     CAPTURE_FINAL_SPEED) / MAX(PLAN_HOOK_HEIGHT
-        - TERMINAL_HORIZONTAL_PLAN_END_HEIGHT, 1).
+        - PLAN_HORIZONTAL_END_HEIGHT, 1).
 // Error derivative with respect to normalized height progress.  Matching this
 // tangent makes the first guidance command continuous with the incoming flight.
 LOCAL PLAN_H_ERROR_SLOPE0 IS -PLAN_H_VEL
@@ -450,6 +688,43 @@ LOCAL PLAN_H_ERROR_SLOPE0 IS -PLAN_H_VEL
 LOCAL FUEL_URGENT IS FALSE.
 LOCAL WAS_PID_MODE IS FALSE.
 LOCAL CAPTURE_ALIGN_MODE IS FALSE.
+LOCAL HIGH_ENERGY_BRAKE_MODE IS FALSE.
+LOCAL WAYPOINT_COAST_MODE IS FALSE.
+LOCAL WAYPOINT_CENTER_BRAKE_MODE IS FALSE.
+LOCAL WAYPOINT_CENTER_BRAKE_DIRECTION IS V(0,0,0).
+LOCAL WAYPOINT_ENDPOINT_TRIM_ACTIVE IS FALSE.
+LOCAL WAYPOINT_ENDPOINT_TRIM_DIRECTION IS V(0,0,0).
+LOCAL WAYPOINT_ENDPOINT_TRIM_TARGET_PROJECTION IS 0.
+LOCAL WAYPOINT_ENDPOINT_TRIM_COUNT IS 0.
+LOCAL WAYPOINT_POST_UPRIGHT_TRIM_ACTIVE IS FALSE.
+LOCAL WAYPOINT_POST_UPRIGHT_TRIM_DONE IS FALSE.
+LOCAL WAYPOINT_POST_UPRIGHT_TRIM_DIRECTION IS V(0,0,0).
+LOCAL WAYPOINT_POST_UPRIGHT_TARGET_PROJECTION IS 0.
+LOCAL WAYPOINT_FINAL_COAST_MODE IS FALSE.
+// Main ignition is the first point at which fast attitude tracking is useful.
+// Before it, the historical 20/20/10 kN-m limit keeps ascent and entry smooth;
+// from here onward the commanded vector is already protected by the 30-degree
+// surface-retrograde cone while speed is high.
+LOCAL TERMINAL_WHEEL_AUTHORITY_ENABLED IS
+    SET_BOOSTER_REACTION_WHEEL_AUTHORITY(
+        BOOSTER_TERMINAL_REACTION_WHEEL_AUTHORITY).
+IF TERMINAL_WHEEL_AUTHORITY_ENABLED {
+    SET STEERINGMANAGER:PITCHTS TO
+        TERMINAL_COAST_STEERING_PITCH_YAW_TS.
+    SET STEERINGMANAGER:YAWTS TO
+        TERMINAL_COAST_STEERING_PITCH_YAW_TS.
+    SET STEERINGMANAGER:ROLLTS TO
+        TERMINAL_COAST_STEERING_ROLL_TS.
+    SET STEERINGMANAGER:MAXSTOPPINGTIME TO
+        TERMINAL_COAST_STEERING_MAX_STOPPING_TIME.
+    SET STEERINGMANAGER:PITCHTORQUEFACTOR TO
+        TERMINAL_COAST_STEERING_TORQUE_FACTOR.
+    SET STEERINGMANAGER:YAWTORQUEFACTOR TO
+        TERMINAL_COAST_STEERING_TORQUE_FACTOR.
+    SET STEERINGMANAGER:ROLLTORQUEFACTOR TO
+        TERMINAL_COAST_STEERING_TORQUE_FACTOR.
+    STEERINGMANAGER:RESETPIDS().
+}
 LOCAL CAPTURE_ALIGN_SPEED_LIMIT IS TERMINAL_ALIGN_SPEED.
 LOCAL HORIZONTAL_SETTLE_MODE IS FALSE.
 LOCAL WIRE_HOLD_STARTED_AT IS -1.
@@ -458,6 +733,7 @@ LOCAL FINAL_ALIGN_STARTED_AT IS -1.
 LOCAL FINAL_DESCENT_ARMED IS FALSE.
 LOCAL TERMINAL_STEERING_TUNED IS FALSE.
 LOCAL FILTERED_H_ACCEL IS V(0,0,0).
+LOCAL MAIN_PWM_ACCUMULATOR IS 0.
 SET LAST_LOG TO TIME:SECONDS.
 
 UNTIL HOOK_CAPTURED() {
@@ -470,6 +746,11 @@ UNTIL HOOK_CAPTURED() {
     LOCAL HEIGHT IS -VDOT(REL_POS, UP_VEC).
     LOCAL HOOK_HEIGHT IS HEIGHT + BOOSTER_HOOK_OFFSET_ALONG_UP(UP_VEC).
     LOCAL HORIZONTAL_POS IS VXCL(UP_VEC, REL_POS).
+    LOCAL WAYPOINT_CONTROL_H_POS IS HORIZONTAL_POS - PLAN_APPROACH_OFFSET.
+    LOCAL TERMINAL_CONTROL_H_POS IS HORIZONTAL_POS.
+    IF HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
+        SET TERMINAL_CONTROL_H_POS TO WAYPOINT_CONTROL_H_POS.
+    }
     LOCAL REL_VEL IS SHIP:VELOCITY:SURFACE.
     LOCAL VERTICAL_V IS VDOT(REL_VEL, UP_VEC).
     LOCAL HORIZONTAL_VEL IS VXCL(UP_VEC, REL_VEL).
@@ -484,6 +765,14 @@ UNTIL HOOK_CAPTURED() {
         SET STEERINGMANAGER:PITCHTS TO TERMINAL_STEERING_PITCH_YAW_TS.
         SET STEERINGMANAGER:YAWTS TO TERMINAL_STEERING_PITCH_YAW_TS.
         SET STEERINGMANAGER:ROLLTS TO TERMINAL_STEERING_ROLL_TS.
+        SET STEERINGMANAGER:MAXSTOPPINGTIME TO
+            TERMINAL_STEERING_MAX_STOPPING_TIME.
+        SET STEERINGMANAGER:PITCHTORQUEFACTOR TO
+            TERMINAL_STEERING_TORQUE_FACTOR.
+        SET STEERINGMANAGER:YAWTORQUEFACTOR TO
+            TERMINAL_STEERING_TORQUE_FACTOR.
+        SET STEERINGMANAGER:ROLLTORQUEFACTOR TO
+            TERMINAL_STEERING_TORQUE_FACTOR.
         STEERINGMANAGER:RESETPIDS().
         SET TERMINAL_STEERING_TUNED TO TRUE.
     }
@@ -495,12 +784,13 @@ UNTIL HOOK_CAPTURED() {
     // capture neighbourhood, a centre crossing must not re-arm the faster
     // stopping profile in the opposite direction.
     IF NOT CAPTURE_ALIGN_MODE AND H_CORRIDOR_MODE
-        AND HORIZONTAL_POS:MAG <= TERMINAL_ALIGN_RANGE {
+        AND HOOK_HEIGHT <= TERMINAL_CAPTURE_ALIGN_ARM_HEIGHT
+        AND TERMINAL_CONTROL_H_POS:MAG <= TERMINAL_ALIGN_RANGE {
         SET CAPTURE_ALIGN_MODE TO TRUE.
         LOCAL CAPTURE_ALIGN_RADIAL_SPEED IS 0.
-        IF HORIZONTAL_POS:MAG > 0 {
+        IF TERMINAL_CONTROL_H_POS:MAG > 0 {
             SET CAPTURE_ALIGN_RADIAL_SPEED TO VDOT(
-                HORIZONTAL_POS:NORMALIZED, HORIZONTAL_VEL).
+                TERMINAL_CONTROL_H_POS:NORMALIZED, HORIZONTAL_VEL).
         }
         // This is a one-way *deceleration* handoff.  The old 30 m/s cap could
         // command a stage already approaching at 8-12 m/s to accelerate again
@@ -509,6 +799,76 @@ UNTIL HOOK_CAPTURED() {
         // never ask for more than the inward speed measured at the latch.
         SET CAPTURE_ALIGN_SPEED_LIMIT TO MAX(
             TERMINAL_ALIGN_MIN_SPEED, CAPTURE_ALIGN_RADIAL_SPEED).
+    }
+    // This high-energy latch is separate from the low-altitude capture field.
+    // It can only fire while approaching the target and never releases, so a
+    // centre crossing cannot command another full-speed pass.
+    IF NOT HIGH_ENERGY_BRAKE_MODE AND H_CORRIDOR_MODE
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
+        AND HOOK_HEIGHT <= TERMINAL_HIGH_ENERGY_BRAKE_ARM_HEIGHT
+        AND TERMINAL_CONTROL_H_POS:MAG
+            <= TERMINAL_HIGH_ENERGY_BRAKE_RANGE
+        AND VDOT(TERMINAL_CONTROL_H_POS, HORIZONTAL_VEL) > 0 {
+        SET HIGH_ENERGY_BRAKE_MODE TO TRUE.
+    }
+    // When the complete 2 km state is already reachable by a short coast,
+    // latch zero throttle.  The previous controller reversed its thrust in
+    // the last 40-80 m of height and turned a compliant centre crossing into
+    // a 9-12 m/s rebound exactly at the formal measurement plane.
+    IF NOT WAYPOINT_COAST_MODE
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
+        LOCAL WAYPOINT_COAST_DROP IS MAX(HOOK_HEIGHT
+            - TERMINAL_WAYPOINT_HEIGHT, 0).
+        LOCAL WAYPOINT_COAST_VERTICAL_SPEED IS SQRT(MAX(
+            VERTICAL_V^2 + 2 * G_ACC * WAYPOINT_COAST_DROP, 0)).
+        LOCAL WAYPOINT_COAST_TGO IS (WAYPOINT_COAST_VERTICAL_SPEED
+            + VERTICAL_V) / MAX(G_ACC, 0.1).
+        LOCAL WAYPOINT_COAST_PREDICTED_H_POS IS HORIZONTAL_POS
+            - HORIZONTAL_VEL * WAYPOINT_COAST_TGO.
+        IF WAYPOINT_COAST_PREDICTED_H_POS:MAG
+                <= TERMINAL_WAYPOINT_COAST_ENTRY_ERROR
+            AND HORIZONTAL_VEL:MAG
+                <= TERMINAL_WAYPOINT_COAST_ENTRY_HORIZONTAL_SPEED
+            AND WAYPOINT_COAST_VERTICAL_SPEED
+                >= TERMINAL_WAYPOINT_COAST_ENTRY_MIN_VERTICAL_SPEED
+            AND WAYPOINT_COAST_VERTICAL_SPEED
+                <= TERMINAL_WAYPOINT_COAST_MAX_VERTICAL_SPEED {
+            SET WAYPOINT_COAST_MODE TO TRUE.
+            IF NOT TERMINAL_WHEEL_AUTHORITY_ENABLED {
+                SET TERMINAL_WHEEL_AUTHORITY_ENABLED TO
+                    SET_BOOSTER_REACTION_WHEEL_AUTHORITY(
+                        BOOSTER_TERMINAL_REACTION_WHEEL_AUTHORITY).
+            }
+            IF TERMINAL_WHEEL_AUTHORITY_ENABLED {
+                SET STEERINGMANAGER:PITCHTS TO
+                    TERMINAL_COAST_STEERING_PITCH_YAW_TS.
+                SET STEERINGMANAGER:YAWTS TO
+                    TERMINAL_COAST_STEERING_PITCH_YAW_TS.
+                SET STEERINGMANAGER:ROLLTS TO
+                    TERMINAL_COAST_STEERING_ROLL_TS.
+                SET STEERINGMANAGER:MAXSTOPPINGTIME TO
+                    TERMINAL_COAST_STEERING_MAX_STOPPING_TIME.
+                SET STEERINGMANAGER:PITCHTORQUEFACTOR TO
+                    TERMINAL_COAST_STEERING_TORQUE_FACTOR.
+                SET STEERINGMANAGER:YAWTORQUEFACTOR TO
+                    TERMINAL_COAST_STEERING_TORQUE_FACTOR.
+                SET STEERINGMANAGER:ROLLTORQUEFACTOR TO
+                    TERMINAL_COAST_STEERING_TORQUE_FACTOR.
+                STEERINGMANAGER:RESETPIDS().
+            }
+        }
+    }
+    // The first entry into the formal waypoint circle is a one-way event.
+    // Continue the existing braking direction instead of rebuilding a position
+    // target on the opposite side of the ship after the centre crossing.
+    IF WAYPOINT_COAST_MODE
+        AND NOT WAYPOINT_CENTER_BRAKE_MODE
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
+        AND HORIZONTAL_POS:MAG
+            <= TERMINAL_WAYPOINT_CENTER_BRAKE_ENTRY_ERROR
+        AND VDOT(HORIZONTAL_POS, HORIZONTAL_VEL) > 0 {
+        SET WAYPOINT_CENTER_BRAKE_MODE TO TRUE.
+        SET WAYPOINT_CENTER_BRAKE_DIRECTION TO HORIZONTAL_VEL:NORMALIZED.
     }
     // Enter this state only once.  Holding the latch prevents a small position
     // excursion from switching the outer controller back on during settling.
@@ -578,6 +938,27 @@ UNTIL HOOK_CAPTURED() {
             SAFE_BRAKING_ACCEL).
     }
     LOCAL VERTICAL_THRUST_CMD IS G_ACC + NET_VERTICAL_ACCEL.
+    IF HOOK_HEIGHT > PLAN_HORIZONTAL_END_HEIGHT {
+        // Solve the vertical component against the same finite 2 km state used
+        // by the ignition calculation.  For constant net acceleration,
+        // t = 2*distance/(initial_down_speed + final_down_speed).
+        LOCAL WAYPOINT_VERTICAL_TGO IS 2
+            * (HOOK_HEIGHT - TERMINAL_WAYPOINT_HEIGHT)
+            / MAX(-VERTICAL_V + TERMINAL_WAYPOINT_VERTICAL_SPEED, 1).
+        LOCAL WAYPOINT_NET_VERTICAL_ACCEL IS
+            (-TERMINAL_WAYPOINT_VERTICAL_SPEED - VERTICAL_V)
+            / MAX(WAYPOINT_VERTICAL_TGO, 0.1).
+        SET VERTICAL_THRUST_CMD TO G_ACC
+            + WAYPOINT_NET_VERTICAL_ACCEL.
+    }
+    // The lower edge of the 2 km gate is as important as its upper edge.  If
+    // model error makes the stage descend more slowly than 150 m/s before the
+    // waypoint, remove deliberate vertical braking and let gravity restore the
+    // corridor instead of spending fuel to arrive even slower.
+    IF HOOK_HEIGHT >= TERMINAL_WAYPOINT_HEIGHT
+        AND VERTICAL_V > -TERMINAL_WAYPOINT_MIN_VERTICAL_SPEED {
+        SET VERTICAL_THRUST_CMD TO 0.
+    }
     // Cubic Hermite reference indexed by lost height.  Because progress comes
     // from altitude rather than a repeatedly extended deadline, the reference
     // reaches the frame entrance exactly once and cannot jump behind the stage.
@@ -586,20 +967,21 @@ UNTIL HOOK_CAPTURED() {
     // endpoint the reference remains at the ship centre, producing the
     // requested nearly vertical final leg instead of a late curved approach.
     LOCAL PLAN_HORIZONTAL_HEIGHT IS MAX(PLAN_HOOK_HEIGHT
-        - TERMINAL_HORIZONTAL_PLAN_END_HEIGHT, 1).
+        - PLAN_HORIZONTAL_END_HEIGHT, 1).
     LOCAL PLAN_PROGRESS IS CLAMP((PLAN_HOOK_HEIGHT - HOOK_HEIGHT)
         / PLAN_HORIZONTAL_HEIGHT, 0, 1).
     LOCAL PLAN_PROGRESS2 IS PLAN_PROGRESS^2.
     LOCAL PLAN_PROGRESS3 IS PLAN_PROGRESS^3.
     LOCAL PLAN_H00 IS 2 * PLAN_PROGRESS3 - 3 * PLAN_PROGRESS2 + 1.
     LOCAL PLAN_H10 IS PLAN_PROGRESS3 - 2 * PLAN_PROGRESS2 + PLAN_PROGRESS.
-    LOCAL PLAN_REFERENCE_H_POS IS PLAN_H_POS * PLAN_H00
+    LOCAL PLAN_REFERENCE_H_POS IS PLAN_CONTROL_H_POS * PLAN_H00
         + PLAN_H_ERROR_SLOPE0 * PLAN_H10.
-    LOCAL PLAN_D_ERROR_DS IS PLAN_H_POS
+    LOCAL PLAN_D_ERROR_DS IS PLAN_CONTROL_H_POS
         * (6 * PLAN_PROGRESS2 - 6 * PLAN_PROGRESS)
         + PLAN_H_ERROR_SLOPE0
         * (3 * PLAN_PROGRESS2 - 4 * PLAN_PROGRESS + 1).
-    LOCAL PLAN_D2_ERROR_DS2 IS PLAN_H_POS * (12 * PLAN_PROGRESS - 6)
+    LOCAL PLAN_D2_ERROR_DS2 IS PLAN_CONTROL_H_POS
+        * (12 * PLAN_PROGRESS - 6)
         + PLAN_H_ERROR_SLOPE0 * (6 * PLAN_PROGRESS - 4).
     LOCAL PLAN_PROGRESS_RATE IS MAX(-VERTICAL_V,
         CAPTURE_FINAL_SPEED) / PLAN_HORIZONTAL_HEIGHT.
@@ -615,12 +997,97 @@ UNTIL HOOK_CAPTURED() {
     LOCAL PLAN_FEEDFORWARD_H_ACCEL IS -PLAN_D2_ERROR_DS2
         * PLAN_PROGRESS_RATE^2.
     LOCAL H_ACCEL IS PLAN_FEEDFORWARD_H_ACCEL
-        + (HORIZONTAL_POS - PLAN_REFERENCE_H_POS)
+        + (WAYPOINT_CONTROL_H_POS - PLAN_REFERENCE_H_POS)
             * TERMINAL_PLAN_POSITION_GAIN
         + (PLAN_REFERENCE_H_VEL - HORIZONTAL_VEL)
             * TERMINAL_PLAN_VELOCITY_GAIN.
     SET H_ACCEL TO CLAMPV(H_ACCEL, TERMINAL_MAX_HORIZONTAL_ACCEL).
-
+    IF HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
+        // Finite-time cubic boundary controller for the formal 2 km state.
+        // For remaining time T, a = 6*position/T^2 - 4*velocity/T reaches
+        // zero position and zero horizontal velocity together.  This direct
+        // endpoint condition removes the phase error left by merely tracking
+        // a height-indexed reference with the long stage's attitude lag.
+        LOCAL HORIZONTAL_VERTICAL_TGO IS 2
+            * (HOOK_HEIGHT - TERMINAL_WAYPOINT_HEIGHT)
+            / MAX(-VERTICAL_V + TERMINAL_WAYPOINT_VERTICAL_SPEED, 1).
+        LOCAL HORIZONTAL_VERTICAL_NET_ACCEL IS
+            (-TERMINAL_WAYPOINT_VERTICAL_SPEED - VERTICAL_V)
+            / MAX(HORIZONTAL_VERTICAL_TGO, 0.1).
+        LOCAL HORIZONTAL_TARGET_DROP IS HOOK_HEIGHT
+            - PLAN_HORIZONTAL_END_HEIGHT.
+        LOCAL HORIZONTAL_TARGET_TGO IS HORIZONTAL_TARGET_DROP
+            / MAX(-VERTICAL_V, 1).
+        IF HORIZONTAL_VERTICAL_NET_ACCEL > 0.001 {
+            LOCAL HORIZONTAL_TARGET_DISC IS MAX(VERTICAL_V^2
+                - 2 * HORIZONTAL_VERTICAL_NET_ACCEL
+                    * HORIZONTAL_TARGET_DROP, 0).
+            SET HORIZONTAL_TARGET_TGO TO (-VERTICAL_V
+                - SQRT(HORIZONTAL_TARGET_DISC))
+                / HORIZONTAL_VERTICAL_NET_ACCEL.
+        }
+        LOCAL HORIZONTAL_CONTROL_TGO IS MAX(HORIZONTAL_TARGET_TGO
+            - TERMINAL_HORIZONTAL_LEAD_SECONDS, 0.5).
+        LOCAL HORIZONTAL_CONTROL_POS IS WAYPOINT_CONTROL_H_POS
+            - HORIZONTAL_VEL * TERMINAL_HORIZONTAL_LEAD_SECONDS.
+        SET H_ACCEL TO HORIZONTAL_CONTROL_POS
+                * TERMINAL_WAYPOINT_POSITION_COEFFICIENT
+                / MAX(HORIZONTAL_CONTROL_TGO^2, 0.25)
+            - HORIZONTAL_VEL * TERMINAL_WAYPOINT_VELOCITY_COEFFICIENT
+                / HORIZONTAL_CONTROL_TGO.
+        SET H_ACCEL TO CLAMPV(H_ACCEL, TERMINAL_MAX_HORIZONTAL_ACCEL).
+    }
+    // Direct stopping-distance guidance owns the high-energy main segment.
+    // Subtract the measured attitude travel before solving v^2/(2a), then use
+    // a small perpendicular position term for the checkpoint residual.  This
+    // makes the ignition calculation and the powered controller use the same
+    // physical model instead of asking a late polynomial path to catch up.
+    IF HOOK_HEIGHT > PLAN_HORIZONTAL_END_HEIGHT
+        AND NOT HIGH_ENERGY_BRAKE_MODE
+        AND HORIZONTAL_VEL:MAG > 0.1 {
+        LOCAL MAIN_H_VEL_DIR IS HORIZONTAL_VEL:NORMALIZED.
+        LOCAL MAIN_ALONG_RANGE IS MAX(VDOT(
+            TERMINAL_CONTROL_H_POS, MAIN_H_VEL_DIR), 0).
+        LOCAL MAIN_COMPENSATED_STOP_RANGE IS MAX(
+            MAIN_ALONG_RANGE
+                - HORIZONTAL_VEL:MAG
+                    * TERMINAL_MAIN_ATTITUDE_RESPONSE_SECONDS
+                - TERMINAL_HORIZONTAL_DEADBAND,
+            TERMINAL_MAIN_DIRECT_STOP_MIN_RANGE).
+        LOCAL MAIN_REQUIRED_H_DECEL IS HORIZONTAL_VEL:MAG^2
+            / (2 * MAIN_COMPENSATED_STOP_RANGE)
+            * TERMINAL_MAIN_DIRECT_STOP_DECEL_GAIN.
+        LOCAL MAIN_CROSS_ERROR IS TERMINAL_CONTROL_H_POS
+            - MAIN_H_VEL_DIR * MAIN_ALONG_RANGE.
+        SET H_ACCEL TO -MAIN_H_VEL_DIR * MAIN_REQUIRED_H_DECEL
+            + MAIN_CROSS_ERROR * TERMINAL_MAIN_DIRECT_STOP_CROSS_GAIN.
+        SET H_ACCEL TO CLAMPV(H_ACCEL,
+            TERMINAL_MAX_HORIZONTAL_ACCEL).
+    }
+    // Once the powered trajectory enters its final stopping neighbourhood,
+    // damp the measured velocity through a bounded, low-speed inward field.
+    // Below 2.2 km the desired velocity becomes zero; position pursuit cannot
+    // reverse the long stage just before the waypoint.
+    IF HIGH_ENERGY_BRAKE_MODE
+        AND HOOK_HEIGHT > PLAN_HORIZONTAL_END_HEIGHT {
+        LOCAL HIGH_ENERGY_DESIRED_H_VEL IS V(0,0,0).
+        IF HOOK_HEIGHT > TERMINAL_HIGH_ENERGY_BRAKE_SETTLE_HEIGHT
+            AND TERMINAL_CONTROL_H_POS:MAG
+                > TERMINAL_HORIZONTAL_DEADBAND {
+            LOCAL HIGH_ENERGY_DESIRED_SPEED IS MIN(
+                TERMINAL_HIGH_ENERGY_BRAKE_MAX_SPEED,
+                (TERMINAL_CONTROL_H_POS:MAG
+                    - TERMINAL_HORIZONTAL_DEADBAND)
+                    * TERMINAL_HIGH_ENERGY_BRAKE_POSITION_GAIN).
+            SET HIGH_ENERGY_DESIRED_H_VEL TO
+                TERMINAL_CONTROL_H_POS:NORMALIZED
+                * HIGH_ENERGY_DESIRED_SPEED.
+        }
+        SET H_ACCEL TO CLAMPV((HIGH_ENERGY_DESIRED_H_VEL
+                - HORIZONTAL_VEL)
+                * TERMINAL_HIGH_ENERGY_BRAKE_VELOCITY_GAIN,
+            TERMINAL_HIGH_ENERGY_BRAKE_MAX_ACCEL).
+    }
     // The 30 km Hermite trajectory owns the high-energy translation.  Once its
     // one-way 300 m neighbourhood latch fires, use the range-indexed velocity
     // field immediately instead of continuing to chase the mathematical path
@@ -634,7 +1101,7 @@ UNTIL HOOK_CAPTURED() {
         // speed, crossed the ship, then repeatedly reversed. Enter early and
         // command only a velocity that can be stopped inside the remaining
         // range, including margin for the long stage's attitude response.
-        LOCAL PID_RANGE IS HORIZONTAL_POS:MAG.
+        LOCAL PID_RANGE IS TERMINAL_CONTROL_H_POS:MAG.
         LOCAL PID_STOP_RANGE IS MAX(PID_RANGE
             - TERMINAL_HORIZONTAL_DEADBAND, 0).
         LOCAL PID_STOP_SPEED IS SQRT(2 * TERMINAL_HORIZONTAL_STOP_ACCEL
@@ -663,7 +1130,8 @@ UNTIL HOOK_CAPTURED() {
         }
         LOCAL DESIRED_H_VEL IS V(0,0,0).
         IF PID_RANGE > TERMINAL_HORIZONTAL_DEADBAND {
-            SET DESIRED_H_VEL TO HORIZONTAL_POS:NORMALIZED * PID_H_SPEED.
+            SET DESIRED_H_VEL TO TERMINAL_CONTROL_H_POS:NORMALIZED
+                * PID_H_SPEED.
         }
         LOCAL PID_VELOCITY_GAIN IS H_VEL_KP.
         LOCAL PID_ACCEL_LIMIT IS TERMINAL_MAX_HORIZONTAL_ACCEL.
@@ -688,25 +1156,24 @@ UNTIL HOOK_CAPTURED() {
     // roughly 140 m after this latch, which is outside the 1 km final-align
     // acquisition radius if position feedback remains disabled forever.
     IF NOT HORIZONTAL_SETTLE_MODE AND CAPTURE_ALIGN_MODE
-        AND HORIZONTAL_POS:MAG <= TERMINAL_ALIGN_SETTLE_ENTRY_RANGE
+        AND TERMINAL_CONTROL_H_POS:MAG
+            <= TERMINAL_ALIGN_SETTLE_ENTRY_RANGE
         AND HORIZONTAL_VEL:MAG <= TERMINAL_ALIGN_SETTLE_ENTRY_SPEED {
         SET HORIZONTAL_SETTLE_MODE TO TRUE.
         SET FILTERED_H_ACCEL TO V(0,0,0).
     }
-    IF HORIZONTAL_SETTLE_MODE
-        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
-        SET H_ACCEL TO CLAMPV(HORIZONTAL_POS
+    IF HORIZONTAL_SETTLE_MODE {
+        SET H_ACCEL TO CLAMPV(TERMINAL_CONTROL_H_POS
             * TERMINAL_ALIGN_SETTLE_POSITION_GAIN
             - HORIZONTAL_VEL * TERMINAL_ALIGN_SETTLE_VELOCITY_GAIN,
             TERMINAL_ALIGN_SETTLE_MAX_ACCEL).
-        IF HORIZONTAL_POS:MAG > TERMINAL_ALIGN_REACQUIRE_RANGE {
-            SET H_ACCEL TO CLAMPV(HORIZONTAL_POS
+        IF TERMINAL_CONTROL_H_POS:MAG > TERMINAL_ALIGN_REACQUIRE_RANGE {
+            SET H_ACCEL TO CLAMPV(TERMINAL_CONTROL_H_POS
                 * TERMINAL_ALIGN_REACQUIRE_POSITION_GAIN
                 - HORIZONTAL_VEL * TERMINAL_ALIGN_SETTLE_VELOCITY_GAIN,
                 TERMINAL_ALIGN_REACQUIRE_MAX_ACCEL).
         }
     }
-
     IF FINAL_ALIGN_MODE AND NOT FINAL_DESCENT_ARMED {
         // The long stage has about a 1.5 s attitude response.  A deliberately
         // slower velocity loop settles that lag while the stage is held above
@@ -847,7 +1314,9 @@ UNTIL HOOK_CAPTURED() {
     // against the existing vertical command instead.  The 75% nominal cap
     // above remains the hard main-braking limit.
     IF H_CORRIDOR_MODE AND H_ACCEL:MAG > 0.01
-        AND HOOK_HEIGHT > 500 {
+        AND HOOK_HEIGHT > 500
+        AND (HOOK_HEIGHT < TERMINAL_WAYPOINT_HEIGHT
+            OR VERTICAL_V <= -TERMINAL_WAYPOINT_MIN_VERTICAL_SPEED) {
         LOCAL REQUIRED_VERTICAL_FOR_TILT IS H_ACCEL:MAG
             / MAX(TAN(TILT_LIMIT), 0.01).
         LOCAL COUPLED_VERTICAL_THRUST IS VERTICAL_THRUST_CMD.
@@ -900,12 +1369,286 @@ UNTIL HOOK_CAPTURED() {
                     * TAN(TERMINAL_VELOCITY_CONE_DEGREES)).
         }
     }
+    LOCAL TERMINAL_THRUST_LIMIT_FRACTION IS
+        TERMINAL_TOTAL_THRUST_FRACTION.
+    IF HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
+        // The solved ignition assumes a constant 75% burn.  Hold that exact
+        // magnitude through the waypoint; direction, not extra throttle, owns
+        // the simultaneous horizontal/vertical correction.
+        SET TERMINAL_THRUST_LIMIT_FRACTION TO
+            TERMINAL_NOMINAL_THRUST_FRACTION.
+    }
     SET DESIRED_THRUST TO CLAMPV(DESIRED_THRUST,
-        AVAILABLE_ACC * TERMINAL_TOTAL_THRUST_FRACTION).
-    LOCAL TILT_CMD IS VANG(DESIRED_THRUST, UP_VEC).
+        AVAILABLE_ACC * TERMINAL_THRUST_LIMIT_FRACTION).
+    LOCAL STEERING_THRUST IS DESIRED_THRUST.
+    LOCAL STEERING_ROLL_REFERENCE IS SHIP:FACING:TOPVECTOR.
+    IF WAYPOINT_FINAL_COAST_MODE {
+        // A fixed horizontal reference lets the steering manager remove roll.
+        // Reusing the stage's instantaneous top vector made the target rotate
+        // with the vehicle and preserved a 40-50 deg/s spin below 1 km.
+        SET STEERING_ROLL_REFERENCE TO
+            RECOVERY_SHIP:FACING:STARVECTOR.
+    }
+    LOCAL STEERING_SURFACE_SPEED IS SHIP:VELOCITY:SURFACE:MAG.
+    IF NOT TERMINAL_WHEEL_AUTHORITY_ENABLED
+        AND H_CORRIDOR_MODE
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
+        AND HOOK_HEIGHT <= TERMINAL_VERTICAL_RECOVERY_PRELEAD_HEIGHT
+        AND STEERING_SURFACE_SPEED
+            >= TERMINAL_VERTICAL_RECOVERY_STEERING_MAX_SURFACE_SPEED
+        AND STEERING_SURFACE_SPEED
+            < TERMINAL_VERTICAL_RECOVERY_PRELEAD_MAX_SURFACE_SPEED
+        AND H_ACCEL:MAG > 0.1 {
+        // Begin rotating at the safe edge of the 30-degree load cone while
+        // dynamic pressure is still high.  Waiting for the 500 m/s handoff
+        // left the physical stage about 45 degrees above the horizon for most
+        // of the remaining horizontal stop, which over-braked the descent.
+        LOCAL PRELEAD_RETROGRADE_AXIS IS
+            -SHIP:VELOCITY:SURFACE:NORMALIZED.
+        LOCAL PRELEAD_TURN_AXIS IS VXCL(PRELEAD_RETROGRADE_AXIS,
+            H_ACCEL:NORMALIZED).
+        IF PRELEAD_TURN_AXIS:MAG > 0.1 {
+            SET STEERING_THRUST TO PRELEAD_RETROGRADE_AXIS
+                    * COS(TERMINAL_VERTICAL_RECOVERY_PRELEAD_DEGREES)
+                + PRELEAD_TURN_AXIS:NORMALIZED
+                    * SIN(TERMINAL_VERTICAL_RECOVERY_PRELEAD_DEGREES).
+        }
+    }
+    IF NOT TERMINAL_WHEEL_AUTHORITY_ENABLED
+        AND H_CORRIDOR_MODE
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
+        AND HOOK_HEIGHT <= TERMINAL_HIGH_ENERGY_BRAKE_ARM_HEIGHT
+        AND VERTICAL_V > -TERMINAL_VERTICAL_RECOVERY_STEERING_SPEED
+        AND STEERING_SURFACE_SPEED
+            < TERMINAL_VERTICAL_RECOVERY_STEERING_MAX_SURFACE_SPEED
+        AND H_ACCEL:MAG > 0.1 {
+        // Throttle magnitude still comes from DESIRED_THRUST.  Only the
+        // attitude setpoint leads through the horizon so the lagging physical
+        // thrust vector reaches horizontal before it over-brakes descent.
+        SET STEERING_THRUST TO H_ACCEL:NORMALIZED
+                * COS(TERMINAL_VERTICAL_RECOVERY_STEERING_DEGREES)
+            - UP_VEC * SIN(
+                TERMINAL_VERTICAL_RECOVERY_STEERING_DEGREES).
+    }
+    LOCAL ACTUAL_THRUST_TILT IS VANG(SHIP:FACING:VECTOR, UP_VEC).
+    LOCAL WAYPOINT_TRIM_ACTIVE IS FALSE.
+    IF WAYPOINT_COAST_MODE
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
+        LOCAL WAYPOINT_FINAL_DROP IS MAX(HOOK_HEIGHT
+            - TERMINAL_WAYPOINT_HEIGHT, 0).
+        LOCAL WAYPOINT_FINAL_VERTICAL_SPEED IS SQRT(MAX(
+            VERTICAL_V^2 + 2 * G_ACC * WAYPOINT_FINAL_DROP, 0)).
+        LOCAL WAYPOINT_FINAL_TGO IS (WAYPOINT_FINAL_VERTICAL_SPEED
+            + VERTICAL_V) / MAX(G_ACC, 0.1).
+        LOCAL WAYPOINT_FINAL_PREDICTED_H_POS IS HORIZONTAL_POS
+            - HORIZONTAL_VEL * WAYPOINT_FINAL_TGO.
+        LOCAL WAYPOINT_CENTER_ALONG_SPEED IS HORIZONTAL_VEL:MAG.
+        IF WAYPOINT_CENTER_BRAKE_MODE
+            AND WAYPOINT_CENTER_BRAKE_DIRECTION:MAG > 0.1 {
+            SET WAYPOINT_CENTER_ALONG_SPEED TO MAX(VDOT(HORIZONTAL_VEL,
+                WAYPOINT_CENTER_BRAKE_DIRECTION), 0).
+        }
+        IF NOT WAYPOINT_FINAL_COAST_MODE
+            AND HORIZONTAL_VEL:MAG
+                <= TERMINAL_WAYPOINT_FINAL_COAST_HORIZONTAL_SPEED {
+            IF WAYPOINT_CENTER_BRAKE_MODE
+                AND HORIZONTAL_POS:MAG <= TERMINAL_WAYPOINT_COAST_ERROR
+                AND WAYPOINT_FINAL_PREDICTED_H_POS:MAG
+                    <= TERMINAL_WAYPOINT_COAST_ERROR {
+                SET WAYPOINT_FINAL_COAST_MODE TO TRUE.
+            } ELSE IF NOT WAYPOINT_CENTER_BRAKE_MODE
+                AND WAYPOINT_FINAL_PREDICTED_H_POS:MAG
+                    <= TERMINAL_WAYPOINT_COAST_ERROR {
+                SET WAYPOINT_FINAL_COAST_MODE TO TRUE.
+            }
+        }
+        // The primary frozen-axis brake can leave a small perpendicular
+        // velocity.  Correct it with a measured fixed-direction delta-v whose
+        // target is the velocity that ballistically reaches the 2 km centre.
+        // A new direction is selected only after the preceding impulse ends.
+        IF WAYPOINT_CENTER_BRAKE_MODE
+            AND NOT WAYPOINT_FINAL_COAST_MODE {
+            IF WAYPOINT_ENDPOINT_TRIM_ACTIVE {
+                LOCAL WAYPOINT_ENDPOINT_PROJECTION_REMAINING IS
+                    WAYPOINT_ENDPOINT_TRIM_TARGET_PROJECTION
+                    - VDOT(HORIZONTAL_VEL,
+                        WAYPOINT_ENDPOINT_TRIM_DIRECTION).
+                IF WAYPOINT_ENDPOINT_PROJECTION_REMAINING
+                    <= TERMINAL_WAYPOINT_ENDPOINT_TRIM_TOLERANCE {
+                    SET WAYPOINT_ENDPOINT_TRIM_ACTIVE TO FALSE.
+                }
+            } ELSE IF WAYPOINT_ENDPOINT_TRIM_COUNT
+                < TERMINAL_WAYPOINT_ENDPOINT_MAX_PULSES {
+                LOCAL WAYPOINT_ENDPOINT_DESIRED_H_VEL IS HORIZONTAL_POS
+                    / MAX(WAYPOINT_FINAL_TGO, 1)
+                    * TERMINAL_WAYPOINT_ENDPOINT_VELOCITY_SCALE.
+                LOCAL WAYPOINT_ENDPOINT_DELTA_V IS
+                    WAYPOINT_ENDPOINT_DESIRED_H_VEL - HORIZONTAL_VEL.
+                IF WAYPOINT_ENDPOINT_DELTA_V:MAG
+                    > TERMINAL_WAYPOINT_ENDPOINT_TRIM_TOLERANCE {
+                    SET WAYPOINT_ENDPOINT_TRIM_DIRECTION TO
+                        WAYPOINT_ENDPOINT_DELTA_V:NORMALIZED.
+                    SET WAYPOINT_ENDPOINT_TRIM_TARGET_PROJECTION TO
+                        VDOT(HORIZONTAL_VEL,
+                            WAYPOINT_ENDPOINT_TRIM_DIRECTION)
+                        + WAYPOINT_ENDPOINT_DELTA_V:MAG.
+                    SET WAYPOINT_ENDPOINT_TRIM_ACTIVE TO TRUE.
+                    SET WAYPOINT_ENDPOINT_TRIM_COUNT TO
+                        WAYPOINT_ENDPOINT_TRIM_COUNT + 1.
+                }
+            }
+        }
+        // Coast first so the low-speed stage can rotate without spending
+        // vertical impulse.  Once aligned and close to the ship, sparse 75%
+        // pulses remove only the residual horizontal velocity.
+        // Receding-horizon cubic rendezvous law.  In both horizontal axes it
+        // drives position and velocity to zero at the ballistic 2 km crossing:
+        // a = 6 * position / T^2 - 4 * velocity / T.  Unlike rebuilding an
+        // along/cross frame from instantaneous velocity, this cannot turn a
+        // nearly stopped approach into a circular chase around the ship.
+        LOCAL WAYPOINT_TRIM_CONTROL_TGO IS MAX(WAYPOINT_FINAL_TGO, 0.5).
+        LOCAL WAYPOINT_TRIM_ACCEL IS HORIZONTAL_POS
+                * (6 / WAYPOINT_TRIM_CONTROL_TGO^2)
+            - HORIZONTAL_VEL * (4 / WAYPOINT_TRIM_CONTROL_TGO).
+        IF WAYPOINT_CENTER_BRAKE_MODE {
+            IF WAYPOINT_ENDPOINT_TRIM_ACTIVE {
+                LOCAL WAYPOINT_ENDPOINT_REMAINING_DELTA_V IS MAX(
+                    WAYPOINT_ENDPOINT_TRIM_TARGET_PROJECTION
+                        - VDOT(HORIZONTAL_VEL,
+                            WAYPOINT_ENDPOINT_TRIM_DIRECTION), 0).
+                LOCAL WAYPOINT_ENDPOINT_TRIM_ACCEL IS MIN(
+                    TERMINAL_WAYPOINT_ENDPOINT_TRIM_MAX_ACCEL,
+                    MAX(WAYPOINT_ENDPOINT_REMAINING_DELTA_V
+                            * TERMINAL_WAYPOINT_ENDPOINT_TRIM_GAIN,
+                        TERMINAL_WAYPOINT_ENDPOINT_TRIM_MIN_ACCEL)).
+                SET WAYPOINT_TRIM_ACCEL TO
+                    WAYPOINT_ENDPOINT_TRIM_DIRECTION
+                    * WAYPOINT_ENDPOINT_TRIM_ACCEL.
+            } ELSE {
+                SET WAYPOINT_TRIM_ACCEL TO V(0,0,0).
+                SET STEERING_THRUST TO UP_VEC.
+            }
+        }
+        SET WAYPOINT_TRIM_ACCEL TO CLAMPV(WAYPOINT_TRIM_ACCEL,
+            TERMINAL_WAYPOINT_TRIM_MAX_ACCEL).
+        SET DESIRED_THRUST TO WAYPOINT_TRIM_ACCEL.
+        IF WAYPOINT_TRIM_ACCEL:MAG > 0.1 {
+            SET STEERING_THRUST TO WAYPOINT_TRIM_ACCEL.
+        }
+        SET WAYPOINT_TRIM_ACTIVE TO
+            NOT WAYPOINT_FINAL_COAST_MODE
+            AND HORIZONTAL_POS:MAG <= TERMINAL_WAYPOINT_TRIM_ARM_RANGE
+            AND ACTUAL_THRUST_TILT
+                >= TERMINAL_WAYPOINT_TRIM_MIN_ACTUAL_TILT
+            AND (WAYPOINT_CENTER_BRAKE_MODE
+                OR HORIZONTAL_VEL:MAG
+                    > TERMINAL_WAYPOINT_COAST_HORIZONTAL_SPEED
+                OR HORIZONTAL_POS:MAG
+                    > TERMINAL_WAYPOINT_COAST_ERROR).
+        // Once the strict horizontal corridor is reachable without another
+        // pulse, turn the long empty stage upright while continuing to coast.
+        // Remaining broadside at 90 degrees removed over 100 m/s of descent
+        // through drag between this handoff and the formal 2 km plane.
+        IF WAYPOINT_FINAL_COAST_MODE {
+            IF WAYPOINT_POST_UPRIGHT_TRIM_ACTIVE {
+                LOCAL WAYPOINT_POST_UPRIGHT_REMAINING IS
+                    WAYPOINT_POST_UPRIGHT_TARGET_PROJECTION
+                    - VDOT(HORIZONTAL_VEL,
+                        WAYPOINT_POST_UPRIGHT_TRIM_DIRECTION).
+                IF WAYPOINT_POST_UPRIGHT_REMAINING
+                    <= TERMINAL_WAYPOINT_POST_UPRIGHT_TOLERANCE {
+                    SET WAYPOINT_POST_UPRIGHT_TRIM_ACTIVE TO FALSE.
+                    SET WAYPOINT_POST_UPRIGHT_TRIM_DONE TO TRUE.
+                }
+            } ELSE IF TERMINAL_WAYPOINT_POST_UPRIGHT_ENABLED
+                AND NOT WAYPOINT_POST_UPRIGHT_TRIM_DONE
+                AND HOOK_HEIGHT
+                    >= TERMINAL_WAYPOINT_POST_UPRIGHT_MIN_HEIGHT
+                AND ACTUAL_THRUST_TILT
+                    <= TERMINAL_WAYPOINT_POST_UPRIGHT_ARM_TILT {
+                LOCAL WAYPOINT_POST_UPRIGHT_DESIRED_H_VEL IS
+                    HORIZONTAL_POS / MAX(WAYPOINT_FINAL_TGO, 1)
+                    * TERMINAL_WAYPOINT_POST_UPRIGHT_VELOCITY_SCALE.
+                LOCAL WAYPOINT_POST_UPRIGHT_DELTA_V IS
+                    WAYPOINT_POST_UPRIGHT_DESIRED_H_VEL - HORIZONTAL_VEL.
+                IF WAYPOINT_POST_UPRIGHT_DELTA_V:MAG
+                    > TERMINAL_WAYPOINT_POST_UPRIGHT_TOLERANCE {
+                    SET WAYPOINT_POST_UPRIGHT_TRIM_DIRECTION TO
+                        WAYPOINT_POST_UPRIGHT_DELTA_V:NORMALIZED.
+                    SET WAYPOINT_POST_UPRIGHT_TARGET_PROJECTION TO
+                        VDOT(HORIZONTAL_VEL,
+                            WAYPOINT_POST_UPRIGHT_TRIM_DIRECTION)
+                        + WAYPOINT_POST_UPRIGHT_DELTA_V:MAG.
+                    SET WAYPOINT_POST_UPRIGHT_TRIM_ACTIVE TO TRUE.
+                } ELSE {
+                    SET WAYPOINT_POST_UPRIGHT_TRIM_DONE TO TRUE.
+                }
+            }
+            IF WAYPOINT_POST_UPRIGHT_TRIM_ACTIVE {
+                LOCAL WAYPOINT_POST_UPRIGHT_DELTA_REMAINING IS MAX(
+                    WAYPOINT_POST_UPRIGHT_TARGET_PROJECTION
+                        - VDOT(HORIZONTAL_VEL,
+                            WAYPOINT_POST_UPRIGHT_TRIM_DIRECTION), 0).
+                LOCAL WAYPOINT_POST_UPRIGHT_H_ACCEL IS MIN(
+                    TERMINAL_WAYPOINT_POST_UPRIGHT_MAX_ACCEL,
+                    MAX(WAYPOINT_POST_UPRIGHT_DELTA_REMAINING
+                            * TERMINAL_WAYPOINT_POST_UPRIGHT_GAIN,
+                        TERMINAL_WAYPOINT_POST_UPRIGHT_MIN_ACCEL)).
+                LOCAL WAYPOINT_POST_UPRIGHT_STEERING IS
+                    UP_VEC * COS(TERMINAL_WAYPOINT_POST_UPRIGHT_TILT)
+                    + WAYPOINT_POST_UPRIGHT_TRIM_DIRECTION
+                        * SIN(TERMINAL_WAYPOINT_POST_UPRIGHT_TILT).
+                SET STEERING_THRUST TO WAYPOINT_POST_UPRIGHT_STEERING.
+                // Planning the correction and being ready to fire are separate
+                // states.  The old path applied 75% while the physical stage
+                // was still upright, turning a lateral trim into a large
+                // vertical impulse.  Slew first, then start the PWM budget.
+                IF VANG(SHIP:FACING:VECTOR,
+                    WAYPOINT_POST_UPRIGHT_STEERING)
+                    <= TERMINAL_WAYPOINT_POST_UPRIGHT_ALIGNMENT_DEGREES {
+                    SET DESIRED_THRUST TO WAYPOINT_POST_UPRIGHT_STEERING
+                        * (WAYPOINT_POST_UPRIGHT_H_ACCEL
+                            / SIN(TERMINAL_WAYPOINT_POST_UPRIGHT_TILT)).
+                } ELSE {
+                    SET DESIRED_THRUST TO V(0,0,0).
+                }
+            } ELSE {
+                SET DESIRED_THRUST TO V(0,0,0).
+                SET STEERING_THRUST TO
+                    -SHIP:VELOCITY:SURFACE:NORMALIZED.
+            }
+        }
+    }
+    // Above the waypoint, WAYPOINT_FINAL_COAST_MODE still owns a pure ballistic
+    // upright coast.  Below it, keep the latched gentle H_SETTLE field active:
+    // a real flight crossed the gate at 24 m / 8.5 m/s, and forcing zero thrust
+    // until 1 km allowed that small outward drift to rebound by 89 m.
+    LOCAL TILT_CMD IS VANG(STEERING_THRUST, UP_VEC).
     LOCAL THROTTLE_CMD IS CLAMP(SHIP:MASS * DESIRED_THRUST:MAG /
         MAX(SHIP:AVAILABLETHRUST, 0.001), 0, 1).
-    LOCK STEERING TO LOOKDIRUP(DESIRED_THRUST, SHIP:FACING:TOPVECTOR).
+    // Every non-zero command after main-burn ignition is exactly 75%, all the
+    // way through capture.  A sigma-delta accumulator represents smaller
+    // requests with zero-throttle frames; limiting this only above 2 km let the
+    // low-altitude controller emit continuous 2-20% commands and violate the
+    // mission's main-burn throttle requirement.
+    LOCAL MAIN_NOMINAL_ACCEL IS AVAILABLE_ACC
+        * TERMINAL_NOMINAL_THRUST_FRACTION.
+    LOCAL MAIN_DUTY IS CLAMP(DESIRED_THRUST:MAG
+        / MAX(MAIN_NOMINAL_ACCEL, 0.001), 0, 1).
+    SET MAIN_PWM_ACCUMULATOR TO MAIN_PWM_ACCUMULATOR + MAIN_DUTY.
+    SET THROTTLE_CMD TO 0.
+    IF MAIN_PWM_ACCUMULATOR >= 1 {
+        SET THROTTLE_CMD TO TERMINAL_NOMINAL_THRUST_FRACTION.
+        SET MAIN_PWM_ACCUMULATOR TO MAIN_PWM_ACCUMULATOR - 1.
+    }
+    IF WAYPOINT_COAST_MODE
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
+        AND NOT WAYPOINT_TRIM_ACTIVE
+        AND NOT WAYPOINT_POST_UPRIGHT_TRIM_ACTIVE {
+        SET THROTTLE_CMD TO 0.
+    }
+    LOCK STEERING TO LOOKDIRUP(STEERING_THRUST,
+        STEERING_ROLL_REFERENCE).
     LOCK THROTTLE TO THROTTLE_CMD.
 
     LOCAL GUIDANCE_PHASE IS "TRAJECTORY".
@@ -914,6 +1657,18 @@ UNTIL HOOK_CAPTURED() {
         SET GUIDANCE_PHASE TO "H_STOPPING".
     }
     IF CAPTURE_ALIGN_MODE { SET GUIDANCE_PHASE TO "H_ALIGN". }
+    IF HIGH_ENERGY_BRAKE_MODE { SET GUIDANCE_PHASE TO "H_BRAKE". }
+    IF WAYPOINT_COAST_MODE { SET GUIDANCE_PHASE TO "WAYPOINT_COAST". }
+    IF WAYPOINT_TRIM_ACTIVE { SET GUIDANCE_PHASE TO "WAYPOINT_TRIM". }
+    IF WAYPOINT_CENTER_BRAKE_MODE AND WAYPOINT_TRIM_ACTIVE {
+        SET GUIDANCE_PHASE TO "WAYPOINT_CENTER_BRAKE".
+    }
+    IF WAYPOINT_FINAL_COAST_MODE {
+        SET GUIDANCE_PHASE TO "WAYPOINT_FINAL_COAST".
+    }
+    IF WAYPOINT_POST_UPRIGHT_TRIM_ACTIVE {
+        SET GUIDANCE_PHASE TO "WAYPOINT_POST_UPRIGHT_TRIM".
+    }
     IF HORIZONTAL_SETTLE_MODE { SET GUIDANCE_PHASE TO "H_SETTLE". }
     IF PID_MODE { SET GUIDANCE_PHASE TO "PID_TERMINAL". }
     IF FINAL_ALIGN_MODE { SET GUIDANCE_PHASE TO "FINAL_ALIGN". }

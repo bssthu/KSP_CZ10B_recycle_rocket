@@ -15,10 +15,19 @@ SET ASCENT_RESERVE_FRACTION TO 0.20.
 SET ASCENT_MIN_SEPARATION_ALTITUDE TO 20000.
 SET ASCENT_MAX_SPEED TO 720.      // 20% lower low-atmosphere speed limit
 SET ASCENT_HIGH_SPEED_THROTTLE TO 0.65.
-SET ASCENT_SPEED_LIMIT_END TO 35000. // stay throttled until the slower turn is complete
+SET ASCENT_SPEED_LIMIT_END TO 32000. // keep the dense-air limit through the turn
+// The part models combined grid-fin/cold-gas authority.  Keep the historical
+// 20/20/10 kN-m response through ascent and entry.  Main-burn guidance releases
+// the full authority so the real thrust vector can follow the load-constrained
+// command instead of retaining a large upward component through the stop.
+SET BOOSTER_FLIGHT_REACTION_WHEEL_AUTHORITY TO 0.625.
+SET BOOSTER_TERMINAL_REACTION_WHEEL_AUTHORITY TO 100.
 SET ASCENT_TURN_START TO 500.     // clear the pad before beginning the turn
-SET ASCENT_TURN_END TO 35000.     // finish the turn above the densest atmosphere
-SET ASCENT_TURN_DEGREES TO 75.    // final commanded pitch is 15 degrees above level
+// Finish a little earlier and three degrees flatter than the previous ascent.
+// The old 15-degree tail of the turn raised apoapsis past the upper-stage
+// target before separation, leaving the second stage dormant until apoapsis.
+SET ASCENT_TURN_END TO 32000.
+SET ASCENT_TURN_DEGREES TO 78.    // final commanded pitch is 12 degrees above level
 SET ASCENT_HEADING TO 90.         // automated sea target is deployed due east
 // Fallback for test stages. The full mission computes this offset from the
 // tank part and live vessel CoM because the stock engine is a separate mass.
@@ -68,7 +77,7 @@ SET TERMINAL_ALIGN_ACCEL_VELOCITY_GAIN TO 1.00.
 // it adds braking altitude without cancelling the final inward approach.
 SET TERMINAL_ALIGN_SETTLE_ENTRY_RANGE TO 130.0.
 SET TERMINAL_ALIGN_SETTLE_ENTRY_SPEED TO 13.0.
-SET TERMINAL_ALIGN_SETTLE_VELOCITY_GAIN TO 3.5.
+SET TERMINAL_ALIGN_SETTLE_VELOCITY_GAIN TO 2.0.
 SET TERMINAL_ALIGN_SETTLE_MAX_ACCEL TO 25.0.
 SET TERMINAL_ALIGN_SETTLE_POSITION_GAIN TO 0.20.
 // Reject a genuine centre escape without restoring the full pursuit profile.
@@ -105,12 +114,21 @@ SET FINAL_CAPTURE_MAX_SPEED TO 0.75.
 // The long, nearly empty stage needs a deliberately soft cooked-steering
 // torque loop near the ship.  The default loop follows sub-degree thrust-vector
 // changes too aggressively and produced measured 12.8-18 deg/s rate spikes.
-// Preserve the default cooked-steering response while the 2 km gate's outward
-// drift is being arrested. Switch to the deliberately soft torque loop at 1 km,
-// where the powered-flight angular-rate audit begins.
-SET TERMINAL_STEERING_TUNE_HEIGHT TO 1000.
+// Preserve the fast cooked-steering response while the high-energy pulse is
+// still turning the stage.  Switch to the deliberately soft torque loop before
+// the 2 km handoff so bounded drift correction cannot create a rate spike in
+// the powered-flight audit below 1 km.
+SET TERMINAL_STEERING_TUNE_HEIGHT TO 2200.
 SET TERMINAL_STEERING_PITCH_YAW_TS TO 8.0.
 SET TERMINAL_STEERING_ROLL_TS TO 5.0.
+SET TERMINAL_STEERING_MAX_STOPPING_TIME TO 2.0.
+SET TERMINAL_STEERING_TORQUE_FACTOR TO 1.0.
+// The high-dynamic-pressure waypoint handoff needs a short, forceful turn.
+// These values are restored to the soft profile above before final capture.
+SET TERMINAL_COAST_STEERING_PITCH_YAW_TS TO 0.5.
+SET TERMINAL_COAST_STEERING_ROLL_TS TO 1.0.
+SET TERMINAL_COAST_STEERING_MAX_STOPPING_TIME TO 50.0.
+SET TERMINAL_COAST_STEERING_TORQUE_FACTOR TO 0.1.
 SET WIRE_HOLD_HEIGHT TO 12.       // wait here while the four cables close around the stage
 SET WIRE_HOLD_HORIZONTAL_RANGE TO 20. // do not spend landing fuel hovering while still far from the frame
 SET WIRE_HOLD_MAX_SECONDS TO 2.5. // short final settle; never a prolonged hover
@@ -124,8 +142,8 @@ SET TELEMETRY_PERIOD TO 0.20.
 // out of ascent and atmospheric coast.
 SET COAST_TRACK_DESCENT_SPEED TO -25. // hold inertial attitude through the fast apex rotation
 SET ENTRY_RETROGRADE_HEIGHT TO 50000. // nozzle points along velocity below this height
-SET ENTRY_DECEL_HEIGHT TO 40000.      // dedicated thermal/load reduction burn
-SET ENTRY_HORIZONTAL_SPEED TO 1500. // skip coupled retrograde braking; the 30 km plan removes lateral speed efficiently
+SET ENTRY_DECEL_HEIGHT TO 30000.      // one dedicated thermal/load reduction burn
+SET ENTRY_HORIZONTAL_SPEED TO 1000.  // cut off as soon as surface-horizontal speed reaches this gate
 SET ENTRY_ATTITUDE_SLEW_SECONDS TO 8.
 SET TERMINAL_GUIDANCE_START_HEIGHT TO 30000.
 SET TERMINAL_MAX_HORIZONTAL_ACCEL TO 55.
@@ -134,7 +152,7 @@ SET TERMINAL_ACCEL_FILTER TO 0.10.
 // two-vessel scene. Use a faster filter above the waypoint so a maximum-energy
 // stopping command does not spend several seconds ramping from 10% authority.
 // The slower value remains active below 2 km to suppress final oscillation.
-SET TERMINAL_HIGH_ENERGY_ACCEL_FILTER TO 0.45.
+SET TERMINAL_HIGH_ENERGY_ACCEL_FILTER TO 0.80.
 // Plan the main landing burn around 75% of the stock engine's maximum. The
 // unused vector magnitude remains available for trajectory-error correction.
 SET TERMINAL_NOMINAL_THRUST_FRACTION TO 0.75.
@@ -146,24 +164,141 @@ SET TERMINAL_VELOCITY_CONE_DEGREES TO 30.
 // hand over to direct vector control.
 SET TERMINAL_VELOCITY_CONE_MIN_SPEED TO 300.
 SET TERMINAL_WAYPOINT_HEIGHT TO 2000.
-// Aim close to, but below, the requested 200 m/s gate.  Horizontal braking is
-// scheduled higher so this value controls the gate rather than tilt coupling.
-SET TERMINAL_WAYPOINT_VERTICAL_SPEED TO 190.
+// The 2 km waypoint is a corridor rather than a one-sided maximum.  Aiming at
+// its centre leaves margin for atmosphere/model error without permitting an
+// early, fuel-wasting slowdown.
+SET TERMINAL_WAYPOINT_VERTICAL_SPEED TO 175.
+SET TERMINAL_WAYPOINT_MIN_VERTICAL_SPEED TO 150.
+SET TERMINAL_WAYPOINT_MAX_VERTICAL_SPEED TO 200.
+// Main ignition is solved against the complete velocity change to the 2 km
+// waypoint at the nominal 75% thrust magnitude.  Only a small state-estimation
+// allowance is added; the former 1.5x stop-distance gate was intentionally
+// conservative all the way to the net and ignited much too early.
+SET TERMINAL_IGNITION_SAFETY TO 1.05.
+SET TERMINAL_IGNITION_MARGIN TO 150.
+// Measured time for the long empty stage to turn a new lateral command into
+// acceleration.  Include it in both ignition height and powered footprint.
+SET TERMINAL_GUIDANCE_RESPONSE_SECONDS TO 1.5.
+SET TERMINAL_HORIZONTAL_FOOTPRINT_LAG_SECONDS TO 1.5.
+SET TERMINAL_HORIZONTAL_LEAD_SECONDS TO 0.45.
+SET TERMINAL_WAYPOINT_POSITION_COEFFICIENT TO 9.0.
+SET TERMINAL_WAYPOINT_VELOCITY_COEFFICIENT TO 4.6.
 // Horizontal braking may add vertical thrust only while descent is faster than
 // this smooth quarter-power floor.  This prevents lateral work from holding the
 // stage near 110 m/s at 6-7 km while retaining full braking authority on entry.
 SET TERMINAL_DESCENT_COUPLING_BAND TO 50.
-// Real-flight telemetry shows the stage still carrying 20 m/s laterally when
-// it reaches 5 km.  Finish the reference there so the attitude-lagged stop is
-// complete before the formal 2 km waypoint.  The former 3.5 km endpoint let
-// the stage cross the ship at 4.8 km, then held it nearly sideways while it
-// corrected a 70-80 m rebound; aerodynamic drag over-braked descent to 98 m/s.
-SET TERMINAL_HORIZONTAL_PLAN_END_HEIGHT TO 6000.
-// At 30 km, create one height-indexed Hermite path from the measured position
-// and velocity to the recovery frame. Tracking a fixed spatial path avoids
-// the aim-point jumps and alternating corrections caused by rolling replans.
+// Finish the horizontal plan at the formal 2 km gate, just short of the
+// ship centre.  The high-energy regression includes the measured 1.5 s stage
+// response and requires both horizontal limits at this same crossing.
+// This is inside the 30 m gate while preventing a high-altitude centre crossing;
+// the existing low-energy controller removes the final offset below 2 km.
+SET TERMINAL_HORIZONTAL_PLAN_END_HEIGHT TO 2000.
+// The formal gate is a 30 m circle.  A 70 m stand-off made first entry depend
+// on dynamic overshoot; target a point 15 m short so every nominal approach
+// necessarily enters the one-way 30 m brake latch without aiming past the net.
+SET TERMINAL_WAYPOINT_APPROACH_OFFSET TO 15.
+SET TERMINAL_CAPTURE_ALIGN_ARM_HEIGHT TO 2000.
+// After the final 16 km checkpoint, coast while already pointing along the
+// solved main-burn vector.  Real telemetry measured a 2.5-3 s attitude lag;
+// starting upright spent the first powered seconds over-braking vertically.
+SET TERMINAL_MAIN_PREALIGN_HEIGHT TO 15000.
+// A distinct one-way high-energy handoff removes the last few hundred metres
+// of horizontal velocity without allowing a centre crossing to re-arm a fast
+// pursuit in the opposite direction.
+SET TERMINAL_HIGH_ENERGY_BRAKE_ARM_HEIGHT TO 6000.
+SET TERMINAL_HIGH_ENERGY_BRAKE_RANGE TO 400.
+SET TERMINAL_HIGH_ENERGY_BRAKE_POSITION_GAIN TO 0.20.
+SET TERMINAL_HIGH_ENERGY_BRAKE_MAX_SPEED TO 30.
+SET TERMINAL_HIGH_ENERGY_BRAKE_VELOCITY_GAIN TO 1.00.
+SET TERMINAL_HIGH_ENERGY_BRAKE_MAX_ACCEL TO 55.
+SET TERMINAL_HIGH_ENERGY_BRAKE_SETTLE_HEIGHT TO 2200.
+// Main ignition and the powered horizontal loop use the measured attitude lag
+// directly.  The 0.45 deceleration factor compensates the strong atmospheric
+// braking still present between 11 km and the formal 2 km waypoint.
+SET TERMINAL_MAIN_ATTITUDE_RESPONSE_SECONDS TO 2.8.
+SET TERMINAL_MAIN_HORIZONTAL_STOP_SAFETY TO 1.0.
+SET TERMINAL_MAIN_DIRECT_STOP_DECEL_GAIN TO 0.45.
+SET TERMINAL_MAIN_DIRECT_STOP_CROSS_GAIN TO 0.02.
+SET TERMINAL_MAIN_DIRECT_STOP_MIN_RANGE TO 100.
+// Below the 300 m/s load-cone threshold, lead the lagging attitude slightly
+// through the horizon once descent approaches the 200 m/s upper gate.  The
+// real stage otherwise keeps an upward thrust component for another 3-5 s and
+// reaches 2 km at only ~80 m/s despite a nearly horizontal command.
+SET TERMINAL_VERTICAL_RECOVERY_STEERING_SPEED TO 300.
+SET TERMINAL_VERTICAL_RECOVERY_STEERING_MAX_SURFACE_SPEED TO 500.
+SET TERMINAL_VERTICAL_RECOVERY_STEERING_DEGREES TO 30.
+SET TERMINAL_VERTICAL_RECOVERY_PRELEAD_HEIGHT TO 7000.
+SET TERMINAL_VERTICAL_RECOVERY_PRELEAD_MAX_SURFACE_SPEED TO 850.
+SET TERMINAL_VERTICAL_RECOVERY_PRELEAD_DEGREES TO 30.
+// Release the vertical main burn only when a 270-285 m/s ballistic 2 km state
+// is reachable.  The wider band covers one 0.2 s telemetry/control sample;
+// the simultaneous horizontal gate still keeps total speed below the 300 m/s
+// load-cone boundary.  Side-slip and the final pulse consume the extra speed.
+SET TERMINAL_WAYPOINT_COAST_ERROR TO 30.
+SET TERMINAL_WAYPOINT_COAST_HORIZONTAL_SPEED TO 4.5.
+SET TERMINAL_WAYPOINT_COAST_MAX_VERTICAL_SPEED TO 285.
+// This is the unbraked ballistic endpoint, not the required 2 km error.
+// Real telemetry reaches the vertical-speed window with enough range to stop,
+// but its coast-only endpoint has already crossed the ship by about 1.3 km.
+// The trim controller below still has to finish inside the strict 30 m gate.
+SET TERMINAL_WAYPOINT_COAST_ENTRY_ERROR TO 1800.
+SET TERMINAL_WAYPOINT_COAST_ENTRY_HORIZONTAL_SPEED TO 230.
+SET TERMINAL_WAYPOINT_COAST_ENTRY_MIN_VERTICAL_SPEED TO 270.
+// Arm across the complete measured stopping footprint.  Waiting for both an
+// 85-degree attitude and a 650 m radius let the unpowered stage cross the ship
+// before its first pulse; at 65 degrees most thrust is already horizontal and
+// the remaining vertical component is small enough for the 150 m/s lower gate.
+SET TERMINAL_WAYPOINT_TRIM_ARM_RANGE TO 1800.
+SET TERMINAL_WAYPOINT_TRIM_MIN_ACTUAL_TILT TO 65.
+SET TERMINAL_WAYPOINT_TRIM_MAX_ACCEL TO 80.
+// Once the first approach enters the formal 30 m circle, continuous position
+// pursuit is finished. Apply one fixed-direction stop;
+// this prevents a 180-degree command reversal after the centre crossing.
+// The verified 157.429 / 2.117 / 21.514 m/s-m 2 km flight entered the frozen
+// brake inside this first-approach neighbourhood.  The 15 m nominal endpoint
+// makes that entry deterministic instead of relying on overshoot.  Do not add
+// a speed gate here: telemetry showed the complete first pass stayed at
+// 51-53 m/s and would otherwise miss this one-way event.
+SET TERMINAL_WAYPOINT_CENTER_BRAKE_ENTRY_ERROR TO 30.
+SET TERMINAL_WAYPOINT_CENTER_BRAKE_SAFETY TO 1.25.
+SET TERMINAL_WAYPOINT_CENTER_BRAKE_VELOCITY_GAIN TO 1.5.
+SET TERMINAL_WAYPOINT_CENTER_BRAKE_MIN_RANGE TO 5.
+// One measured two-axis delta-v removes both the frozen primary speed and its
+// perpendicular residual.  Do not reverse for a second endpoint correction:
+// the long broadside stage retains too much angular momentum for a safe
+// high-dynamic-pressure direction change.
+SET TERMINAL_WAYPOINT_ENDPOINT_TRIM_MAX_ACCEL TO 60.
+SET TERMINAL_WAYPOINT_ENDPOINT_TRIM_GAIN TO 3.
+SET TERMINAL_WAYPOINT_ENDPOINT_TRIM_MIN_ACCEL TO 5.
+SET TERMINAL_WAYPOINT_ENDPOINT_TRIM_TOLERANCE TO 0.5.
+// The subsequent 90-to-0 degree coast slew consistently adds about 2.8 m/s
+// outward and 35 m of displacement.  End this single impulse with a small
+// opposite velocity so the measured slew drift, rather than another burn,
+// brings the stage to the formal waypoint.
+SET TERMINAL_WAYPOINT_ENDPOINT_VELOCITY_SCALE TO -0.75.
+SET TERMINAL_WAYPOINT_ENDPOINT_MAX_PULSES TO 1.
+// Keep the aligned post-upright experiment available for diagnostics, but the
+// accepted path compensates the measured slew drift in the single endpoint
+// impulse above.  A second high-altitude turn cost too much vertical speed.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_ENABLED TO FALSE.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_MIN_HEIGHT TO 2300.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_ARM_TILT TO 10.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_TILT TO 80.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_ALIGNMENT_DEGREES TO 10.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_VELOCITY_SCALE TO 0.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_MAX_ACCEL TO 20.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_GAIN TO 2.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_MIN_ACCEL TO 3.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_TOLERANCE TO 0.5.
+// A final PWM pulse changes horizontal speed by several metres per second.
+// Once the ballistic 2 km endpoint is inside the strict position gate and the
+// residual speed is this small, latch coast instead of re-arming another pulse.
+SET TERMINAL_WAYPOINT_FINAL_COAST_HORIZONTAL_SPEED TO 5.0.
+// At main ignition, create one height-indexed Hermite path from the measured
+// position and velocity to the recovery frame. Tracking a fixed spatial path
+// avoids the aim-point jumps and alternating corrections caused by replans.
 SET TERMINAL_PLAN_POSITION_GAIN TO 0.10.
-SET TERMINAL_PLAN_VELOCITY_GAIN TO 1.50.
+SET TERMINAL_PLAN_VELOCITY_GAIN TO 3.00.
 // Keep the safety envelope at the same physical authority as the controller.
 // A 3 m/s^2 envelope clipped the Hermite reference to a few hundred m/s at
 // 30 km and silently replaced height scheduling with premature spatial stop.
@@ -178,10 +313,19 @@ SET TERMINAL_LOW_FUEL_DESCENT_SCALE TO 1.28.
 // 13.78 m/s free-fall crossing.
 SET TERMINAL_LOW_FUEL_CAPTURE_SPEED TO 6.0.
 SET TERMINAL_DESCENT_MAX_SPEED TO 700.
-SET MIDCOURSE_START_HEIGHT TO 30000.
-SET MIDCOURSE_END_MARGIN TO 600.
-SET MIDCOURSE_PREDICTED_ERROR TO 999999999. // ship is on measured footprint; disable noisy micro-corrections
+// After the 30 km thermal burn, coast at zero throttle.  At most one short
+// footprint-correction pulse is allowed at each checkpoint; terminal braking
+// supersedes a pulse whenever its solved ignition gate is reached.
+SET MIDCOURSE_CHECKPOINT_1_HEIGHT TO 24000.
+SET MIDCOURSE_CHECKPOINT_2_HEIGHT TO 20000.
+SET MIDCOURSE_CHECKPOINT_3_HEIGHT TO 16000.
+SET MIDCOURSE_PULSE_SECONDS TO 1.5.
+SET MIDCOURSE_PREDICTED_ERROR TO 100.
 SET MIDCOURSE_MAX_HORIZONTAL_ACCEL TO 8.
+SET MIDCOURSE_MAX_THROTTLE TO 0.20.
+SET MIDCOURSE_MAX_DELTA_V TO 15.
+SET MIDCOURSE_MAX_HEIGHT_DROP TO 900.
+SET MIDCOURSE_MIN_FUEL_FRACTION TO 0.12.
 SET MIDCOURSE_VELOCITY_GAIN TO 0.30.
 SET MIDCOURSE_VERTICAL_THRUST_G TO 0. // horizontal-only footprint correction; preserve landing fuel
 

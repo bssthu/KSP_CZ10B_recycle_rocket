@@ -28,10 +28,23 @@ TERMINAL_TOTAL_THRUST_FRACTION = 0.98
 TERMINAL_VELOCITY_CONE = math.radians(30.0)
 TERMINAL_VELOCITY_CONE_MIN_SPEED = 300.0
 TERMINAL_WAYPOINT_HEIGHT = 2000.0
-TERMINAL_WAYPOINT_VERTICAL_SPEED = 190.0
-TERMINAL_HORIZONTAL_PLAN_END_HEIGHT = 6000.0
+TERMINAL_WAYPOINT_VERTICAL_SPEED = 175.0
+TERMINAL_WAYPOINT_MIN_VERTICAL_SPEED = 150.0
+TERMINAL_WAYPOINT_MAX_VERTICAL_SPEED = 200.0
+TERMINAL_HORIZONTAL_PLAN_END_HEIGHT = 2000.0
+PLATFORM_FOOTPRINT_PLAN_END_HEIGHT = 3000.0
+PLATFORM_FOOTPRINT_DOWNRANGE_BIAS = 200.0
+TERMINAL_WAYPOINT_APPROACH_OFFSET = 70.0
+TERMINAL_CAPTURE_ALIGN_ARM_HEIGHT = 2000.0
+TERMINAL_IGNITION_SAFETY = 1.05
+TERMINAL_IGNITION_MARGIN = 150.0
+TERMINAL_GUIDANCE_RESPONSE_SECONDS = 1.5
+TERMINAL_HORIZONTAL_FOOTPRINT_LAG_SECONDS = 1.5
+TERMINAL_HORIZONTAL_LEAD_SECONDS = 0.45
+TERMINAL_WAYPOINT_POSITION_COEFFICIENT = 9.0
+TERMINAL_WAYPOINT_VELOCITY_COEFFICIENT = 4.6
 PLAN_POSITION_GAIN = 0.10
-PLAN_VELOCITY_GAIN = 1.50
+PLAN_VELOCITY_GAIN = 3.00
 PLAN_STOP_ACCEL = 55.0
 MAX_HORIZONTAL_ACCEL = 55.0
 PID_SWITCH_HEIGHT = 18.0
@@ -51,7 +64,7 @@ CABLE_SETTLE_ERROR = 0.75
 CABLE_DETECTION_DEPTH = 6.0
 CLOSED_CABLE_INSET = 2.15
 TERMINAL_ACCEL_FILTER = 0.10
-TERMINAL_HIGH_ENERGY_ACCEL_FILTER = 0.45
+TERMINAL_HIGH_ENERGY_ACCEL_FILTER = 0.80
 FINAL_HORIZONTAL_SPEED = 0.5
 HORIZONTAL_CORRIDOR_SPEED = 150.0
 HORIZONTAL_STOP_ACCEL = 0.60
@@ -68,7 +81,7 @@ HORIZONTAL_ALIGN_SETTLE_ENTRY_SPEED = 13.0
 HORIZONTAL_ALIGN_SETTLE_ENTRY_RANGE = 130.0
 HORIZONTAL_ALIGN_SETTLE_MAX_ACCEL = 25.0
 HORIZONTAL_ALIGN_SETTLE_POSITION_GAIN = 0.20
-HORIZONTAL_ALIGN_SETTLE_VELOCITY_GAIN = 3.5
+HORIZONTAL_ALIGN_SETTLE_VELOCITY_GAIN = 2.0
 HORIZONTAL_ALIGN_REACQUIRE_RANGE = 30.0
 HORIZONTAL_ALIGN_REACQUIRE_POSITION_GAIN = 0.20
 HORIZONTAL_ALIGN_REACQUIRE_MAX_ACCEL = 25.0
@@ -90,14 +103,49 @@ FINAL_CAPTURE_MAX_SPEED = 0.75
 ENTRY_MAX_TILT = 89.0
 LANDING_MAX_TILT = 12.0
 VERTICAL_DRAG_FACTOR = 2.5e-5
-HORIZONTAL_DRAG_FACTOR = 1.5e-4
+HORIZONTAL_DRAG_FACTOR = 3.0e-5
 ATMOSPHERE_SCALE_HEIGHT = 5000.0
-MIDCOURSE_START_HEIGHT = 30000.0
 TERMINAL_GUIDANCE_START_HEIGHT = 30000.0
-MIDCOURSE_END_MARGIN = 600.0
-MIDCOURSE_PREDICTED_ERROR = 999999999.0
+MIDCOURSE_PREDICTED_ERROR = 100.0
 MIDCOURSE_MAX_HORIZONTAL_ACCEL = 8.0
 TERMINAL_DESCENT_COUPLING_BAND = 50.0
+MAIN_START_FUEL_FRACTION = 0.136
+MAIN_FULL_THROTTLE_FUEL_SECONDS = 16.4
+MAIN_DRY_MASS_RATIO = 0.50
+MAIN_STEERING_RESPONSE_SECONDS = 2.8
+TERMINAL_STEERING_RESPONSE_SECONDS = 0.5
+MAIN_PREALIGN_HEIGHT = 15000.0
+MAIN_PWM_ENABLED = True
+MAIN_PURE_HORIZONTAL_BRAKE = False
+MAIN_DIRECT_STOP_GUIDANCE = True
+MAIN_DIRECT_STOP_CROSS_GAIN = 0.02
+MAIN_DIRECT_STOP_MIN_RANGE = 100.0
+MAIN_DIRECT_STOP_DECEL_GAIN = 0.45
+MAIN_HORIZONTAL_STOP_DISTANCE_SAFETY = 1.0
+HIGH_ENERGY_BRAKE_ENABLED = True
+HIGH_ENERGY_BRAKE_ARM_HEIGHT = 6000.0
+HIGH_ENERGY_BRAKE_RANGE = 400.0
+HIGH_ENERGY_BRAKE_VELOCITY_GAIN = 1.0
+HIGH_ENERGY_BRAKE_MAX_ACCEL = 55.0
+HIGH_ENERGY_BRAKE_POSITION_GAIN = 0.2
+HIGH_ENERGY_BRAKE_MAX_SPEED = 30.0
+HIGH_ENERGY_BRAKE_SETTLE_HEIGHT = 2200.0
+VERTICAL_RECOVERY_STEERING_SPEED = 300.0
+VERTICAL_RECOVERY_STEERING_MAX_SURFACE_SPEED = 500.0
+VERTICAL_RECOVERY_STEERING_DEGREES = 30.0
+VERTICAL_RECOVERY_PRELEAD_HEIGHT = 7000.0
+VERTICAL_RECOVERY_PRELEAD_MAX_SURFACE_SPEED = 850.0
+VERTICAL_RECOVERY_PRELEAD_DEGREES = 30.0
+WAYPOINT_COAST_MAX_VERTICAL_SPEED = 280.0
+WAYPOINT_COAST_MAX_HORIZONTAL_SPEED = 4.5
+WAYPOINT_COAST_ENTRY_MAX_ERROR = 1300.0
+WAYPOINT_COAST_ENTRY_MAX_HORIZONTAL_SPEED = 220.0
+WAYPOINT_COAST_ENTRY_MIN_VERTICAL_SPEED = 275.0
+WAYPOINT_TRIM_ARM_RANGE = 650.0
+WAYPOINT_TRIM_MIN_ACTUAL_TILT = math.radians(85.0)
+WAYPOINT_TRIM_MAX_ACCEL = 55.0
+WAYPOINT_TRIM_CROSS_GAIN = 0.20
+WAYPOINT_TRIM_POSITION_GAIN = 0.20
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -122,6 +170,7 @@ class Case:
     vz: float
     available_accel: float
     sensor_delay: float
+    start_powered: bool
 
 
 @dataclass
@@ -143,13 +192,15 @@ class Result:
     max_velocity_cone_angle: float = 0.0
 
 
-def run(case: Case) -> Result:
+def run(case: Case, stop_at_waypoint: bool = False, trace: bool = False) -> Result:
     h = case.height
     vv = case.vertical_speed
     x, z, vx, vz = case.x, case.z, case.vx, case.vz
     integral = 0.0
     was_pid_mode = False
     capture_align_mode = False
+    high_energy_brake_mode = False
+    waypoint_coast_mode = False
     horizontal_settle_mode = False
     capture_align_speed_limit = HORIZONTAL_ALIGN_SPEED
     final_align_mode = False
@@ -160,22 +211,39 @@ def run(case: Case) -> Result:
     cable_target_acquired = False
     cable_x = 0.0
     cable_z = 0.0
-    actual_ax = 0.0
-    actual_az = 0.0
+    # The ballistic loop holds the long stage upright.  Steering changes the
+    # thrust *direction* with a measured ~1.5 s response, while engine cutoff
+    # removes magnitude immediately.  Lagging acceleration itself would keep
+    # producing force during PWM-off frames and hide the real vertical bias.
+    actual_dir_up = 1.0
+    actual_dir_x = 0.0
+    actual_dir_z = 0.0
     filtered_ax = 0.0
     filtered_az = 0.0
     history: list[tuple[float, float, float, float, float, float]] = []
     minimum_height = h
     hover_time = 0.0
-    ignition_height = h
+    powered = case.start_powered
+    ignition_height = h if powered else -1.0
     full_throttle_seconds = 0.0
     entered_center = False
     rebound_after_center = 0.0
-    powered = True
     plan_height = max(h, 1.0)
-    plan_x, plan_z = x, z
+    plan_end_height = min(
+        TERMINAL_HORIZONTAL_PLAN_END_HEIGHT,
+        max(TERMINAL_WAYPOINT_HEIGHT, plan_height - 500.0),
+    )
+    initial_horizontal_speed = math.hypot(vx, vz)
+    if initial_horizontal_speed > 0.1:
+        approach_x = vx / initial_horizontal_speed * TERMINAL_WAYPOINT_APPROACH_OFFSET
+        approach_z = vz / initial_horizontal_speed * TERMINAL_WAYPOINT_APPROACH_OFFSET
+    else:
+        initial_range = math.hypot(x, z)
+        approach_x = x / max(initial_range, 0.1) * TERMINAL_WAYPOINT_APPROACH_OFFSET
+        approach_z = z / max(initial_range, 0.1) * TERMINAL_WAYPOINT_APPROACH_OFFSET
+    plan_x, plan_z = x - approach_x, z - approach_z
     initial_progress_rate = max(-vv, CAPTURE_SPEED) / max(
-        plan_height - TERMINAL_HORIZONTAL_PLAN_END_HEIGHT, 1.0
+        plan_height - plan_end_height, 1.0
     )
     plan_error_slope_x = -vx / max(initial_progress_rate, 0.0001)
     plan_error_slope_z = -vz / max(initial_progress_rate, 0.0001)
@@ -183,9 +251,19 @@ def run(case: Case) -> Result:
     waypoint_lateral_speed = math.nan
     waypoint_error = math.nan
     max_velocity_cone_angle = 0.0
+    main_pwm_accumulator = 0.0
 
     for step in range(int(480 / DT)):
         now = step * DT
+        fuel_burn_fraction = clamp(
+            full_throttle_seconds / MAIN_FULL_THROTTLE_FUEL_SECONDS,
+            0.0,
+            1.0,
+        )
+        mass_ratio = 1.0 - (1.0 - MAIN_DRY_MASS_RATIO) * fuel_burn_fraction
+        available_accel = case.available_accel / max(mass_ratio, 0.01)
+        if fuel_burn_fraction >= 1.0:
+            available_accel = 0.0
         history.append((h, vv, x, z, vx, vz))
         delay_steps = min(len(history) - 1, int(case.sensor_delay / DT))
         sensed_h, sensed_vv, sensed_x, sensed_z, sensed_vx, sensed_vz = history[-1 - delay_steps]
@@ -197,28 +275,135 @@ def run(case: Case) -> Result:
         drag_az = -HORIZONTAL_DRAG_FACTOR * density * vz * horizontal_speed
 
         if not powered:
-            available_net_decel = max(
-                case.available_accel * TERMINAL_NOMINAL_THRUST_FRACTION
-                - G + max(vertical_drag, 0.0), 0.1
+            effective_g = max(G - max(vertical_drag, 0.0), 1.0)
+            nominal_accel = (
+                available_accel * TERMINAL_NOMINAL_THRUST_FRACTION
             )
-            stop_distance = max(sensed_vv**2 - CAPTURE_SPEED**2, 0.0) / (
-                2.0 * available_net_decel
-            ) * 1.50
-            if sensed_vv < 0 and sensed_h <= stop_distance + 250.0:
+            burn_dv_vertical = -TERMINAL_WAYPOINT_VERTICAL_SPEED - sensed_vv
+            burn_dv_squared = (
+                burn_dv_vertical**2 + sensed_vx**2 + sensed_vz**2
+            )
+            quadratic_a = effective_g**2 - nominal_accel**2
+            quadratic_b = 2.0 * effective_g * burn_dv_vertical
+            burn_time = 999.0
+            if quadratic_a < -0.001:
+                discriminant = max(
+                    quadratic_b**2 - 4.0 * quadratic_a * burn_dv_squared,
+                    0.0,
+                )
+                burn_time = max(
+                    (-quadratic_b - math.sqrt(discriminant))
+                    / (2.0 * quadratic_a),
+                    0.0,
+                )
+            planned_burn_time = burn_time + TERMINAL_GUIDANCE_RESPONSE_SECONDS
+            burn_drop = max(
+                -(sensed_vv - TERMINAL_WAYPOINT_VERTICAL_SPEED)
+                * 0.5
+                * planned_burn_time,
+                0.0,
+            )
+            ignition_gate = (
+                TERMINAL_WAYPOINT_HEIGHT
+                + burn_drop * TERMINAL_IGNITION_SAFETY
+                + TERMINAL_IGNITION_MARGIN
+            )
+            prealign_vertical_thrust = effective_g + burn_dv_vertical / max(
+                planned_burn_time, 0.1
+            )
+            horizontal_stop_accel = math.sqrt(max(
+                nominal_accel**2 - prealign_vertical_thrust**2,
+                1.0,
+            ))
+            sensed_horizontal_speed = math.hypot(sensed_vx, sensed_vz)
+            horizontal_stop_distance = (
+                sensed_horizontal_speed * MAIN_STEERING_RESPONSE_SECONDS
+                + sensed_horizontal_speed**2
+                / (2.0 * horizontal_stop_accel)
+            ) * MAIN_HORIZONTAL_STOP_DISTANCE_SAFETY
+            horizontal_ignition = (
+                math.hypot(sensed_x, sensed_z)
+                <= horizontal_stop_distance
+                + TERMINAL_WAYPOINT_APPROACH_OFFSET
+            )
+            if sensed_vv < 0 and (
+                sensed_h <= ignition_gate or horizontal_ignition
+            ):
+                # Medium-energy cases begin at the solved ignition gate.  They
+                # represent a stage that has already used the preceding coast
+                # to settle onto this vector, even though the shortened test
+                # case omits those seconds explicitly.
+                prealign_up = effective_g + burn_dv_vertical / max(
+                    planned_burn_time, 0.1
+                )
+                prealign_x = -sensed_vx / max(planned_burn_time, 0.1)
+                prealign_z = -sensed_vz / max(planned_burn_time, 0.1)
+                prealign_magnitude = math.sqrt(
+                    prealign_up**2 + prealign_x**2 + prealign_z**2
+                )
+                actual_dir_up = prealign_up / prealign_magnitude
+                actual_dir_x = prealign_x / prealign_magnitude
+                actual_dir_z = prealign_z / prealign_magnitude
                 powered = True
                 ignition_height = sensed_h
                 plan_height = max(sensed_h, 1.0)
+                plan_end_height = min(
+                    TERMINAL_HORIZONTAL_PLAN_END_HEIGHT,
+                    max(TERMINAL_WAYPOINT_HEIGHT, plan_height - 500.0),
+                )
                 plan_x, plan_z = sensed_x, sensed_z
+                ignition_horizontal_speed = math.hypot(sensed_vx, sensed_vz)
+                if ignition_horizontal_speed > 0.1:
+                    approach_x = sensed_vx / ignition_horizontal_speed * TERMINAL_WAYPOINT_APPROACH_OFFSET
+                    approach_z = sensed_vz / ignition_horizontal_speed * TERMINAL_WAYPOINT_APPROACH_OFFSET
+                else:
+                    ignition_range = math.hypot(sensed_x, sensed_z)
+                    approach_x = sensed_x / max(ignition_range, 0.1) * TERMINAL_WAYPOINT_APPROACH_OFFSET
+                    approach_z = sensed_z / max(ignition_range, 0.1) * TERMINAL_WAYPOINT_APPROACH_OFFSET
+                plan_x, plan_z = sensed_x - approach_x, sensed_z - approach_z
                 progress_rate0 = max(-sensed_vv, CAPTURE_SPEED) / max(
-                    plan_height - TERMINAL_HORIZONTAL_PLAN_END_HEIGHT, 1.0
+                    plan_height - plan_end_height, 1.0
                 )
                 plan_error_slope_x = -sensed_vx / max(progress_rate0, 0.0001)
                 plan_error_slope_z = -sensed_vz / max(progress_rate0, 0.0001)
             else:
-                effective_g = max(G - max(vertical_drag, 0.0), 1.0)
+                if sensed_h <= MAIN_PREALIGN_HEIGHT:
+                    # After the last checkpoint, rotate toward the solved
+                    # constant-75% burn vector while coasting.  The flight
+                    # stage otherwise starts upright and spends the first
+                    # seconds of the burn putting too much thrust upward.
+                    prealign_up = effective_g + burn_dv_vertical / max(
+                        planned_burn_time, 0.1
+                    )
+                    prealign_x = -sensed_vx / max(planned_burn_time, 0.1)
+                    prealign_z = -sensed_vz / max(planned_burn_time, 0.1)
+                    prealign_magnitude = math.sqrt(
+                        prealign_up**2 + prealign_x**2 + prealign_z**2
+                    )
+                    response = DT / (MAIN_STEERING_RESPONSE_SECONDS + DT)
+                    actual_dir_up += (
+                        prealign_up / prealign_magnitude - actual_dir_up
+                    ) * response
+                    actual_dir_x += (
+                        prealign_x / prealign_magnitude - actual_dir_x
+                    ) * response
+                    actual_dir_z += (
+                        prealign_z / prealign_magnitude - actual_dir_z
+                    ) * response
+                    actual_dir_magnitude = math.sqrt(
+                        actual_dir_up**2 + actual_dir_x**2 + actual_dir_z**2
+                    )
+                    actual_dir_up /= actual_dir_magnitude
+                    actual_dir_x /= actual_dir_magnitude
+                    actual_dir_z /= actual_dir_magnitude
                 ballistic_tgo = (
                     sensed_vv
-                    + math.sqrt(max(sensed_vv**2 + 2.0 * effective_g * sensed_h, 0.0))
+                    + math.sqrt(max(
+                        sensed_vv**2
+                        + 2.0 * effective_g
+                        * max(sensed_h - TERMINAL_WAYPOINT_HEIGHT, 0.0),
+                        0.0,
+                    ))
                 ) / effective_g
                 predicted_x = sensed_vx * ballistic_tgo + 0.5 * drag_ax * ballistic_tgo**2
                 predicted_z = sensed_vz * ballistic_tgo + 0.5 * drag_az * ballistic_tgo**2
@@ -226,9 +411,7 @@ def run(case: Case) -> Result:
                     sensed_x - predicted_x, sensed_z - predicted_z
                 )
                 midcourse = (
-                    sensed_h <= MIDCOURSE_START_HEIGHT
-                    and sensed_h > stop_distance + MIDCOURSE_END_MARGIN
-                    and predicted_error > MIDCOURSE_PREDICTED_ERROR
+                    False  # short discrete pulses are outside this terminal sweep
                 )
                 target_ax = 0.0
                 target_az = 0.0
@@ -248,15 +431,12 @@ def run(case: Case) -> Result:
                     vertical_thrust = 0.0
                     full_throttle_seconds += (
                         math.sqrt(vertical_thrust**2 + target_ax**2 + target_az**2)
-                        / max(case.available_accel, 0.001)
+                        / max(available_accel, 0.001)
                         * DT
                     )
-                response = DT / (0.4 + DT)
-                actual_ax += (target_ax - actual_ax) * response
-                actual_az += (target_az - actual_az) * response
                 vv += (vertical_thrust - G + vertical_drag) * DT
-                vx += (actual_ax + drag_ax) * DT
-                vz += (actual_az + drag_az) * DT
+                vx += drag_ax * DT
+                vz += drag_az * DT
                 h += vv * DT
                 x -= vx * DT
                 z -= vz * DT
@@ -276,6 +456,13 @@ def run(case: Case) -> Result:
                 continue
 
         error = math.hypot(sensed_x, sensed_z)
+        waypoint_x = sensed_x - approach_x
+        waypoint_z = sensed_z - approach_z
+        if sensed_h > TERMINAL_WAYPOINT_HEIGHT:
+            terminal_x, terminal_z = waypoint_x, waypoint_z
+        else:
+            terminal_x, terminal_z = sensed_x, sensed_z
+        terminal_error = math.hypot(terminal_x, terminal_z)
         pid_mode = sensed_h <= PID_SWITCH_HEIGHT
         horizontal_corridor_mode = (
             sensed_h <= HORIZONTAL_CORRIDOR_HEIGHT
@@ -284,15 +471,52 @@ def run(case: Case) -> Result:
         if (
             not capture_align_mode
             and horizontal_corridor_mode
-            and error <= HORIZONTAL_ALIGN_RANGE
+            and sensed_h <= TERMINAL_CAPTURE_ALIGN_ARM_HEIGHT
+            and terminal_error <= HORIZONTAL_ALIGN_RANGE
         ):
             capture_align_mode = True
             radial_speed = (
-                (sensed_x * sensed_vx + sensed_z * sensed_vz) / error
-                if error > 0.0
+                (terminal_x * sensed_vx + terminal_z * sensed_vz)
+                / terminal_error
+                if terminal_error > 0.0
                 else 0.0
             )
             capture_align_speed_limit = max(HORIZONTAL_ALIGN_MIN_SPEED, radial_speed)
+        if (
+            HIGH_ENERGY_BRAKE_ENABLED
+            and not high_energy_brake_mode
+            and sensed_h > TERMINAL_WAYPOINT_HEIGHT
+            and sensed_h <= HIGH_ENERGY_BRAKE_ARM_HEIGHT
+            and terminal_error <= HIGH_ENERGY_BRAKE_RANGE
+            and terminal_x * sensed_vx + terminal_z * sensed_vz > 0.0
+        ):
+            high_energy_brake_mode = True
+        if (
+            not waypoint_coast_mode
+            and sensed_h > TERMINAL_WAYPOINT_HEIGHT
+        ):
+            coast_endpoint_speed = math.sqrt(max(
+                sensed_vv**2
+                + 2.0 * G * (sensed_h - TERMINAL_WAYPOINT_HEIGHT),
+                0.0,
+            ))
+            coast_tgo = (
+                coast_endpoint_speed + sensed_vv
+            ) / max(G, 0.1)
+            coast_endpoint_error = math.hypot(
+                sensed_x - sensed_vx * coast_tgo,
+                sensed_z - sensed_vz * coast_tgo,
+            )
+            if (
+                coast_endpoint_error <= WAYPOINT_COAST_ENTRY_MAX_ERROR
+                and math.hypot(sensed_vx, sensed_vz)
+                    <= WAYPOINT_COAST_ENTRY_MAX_HORIZONTAL_SPEED
+                and
+                WAYPOINT_COAST_ENTRY_MIN_VERTICAL_SPEED
+                <= coast_endpoint_speed
+                <= WAYPOINT_COAST_MAX_VERTICAL_SPEED
+            ):
+                waypoint_coast_mode = True
         if (
             not final_align_mode
             and sensed_h <= FINAL_ALIGN_HEIGHT
@@ -331,8 +555,9 @@ def run(case: Case) -> Result:
                 / TERMINAL_WAYPOINT_HEIGHT,
             ),
         )
-        estimated_fraction = RECOVERY_START_FRACTION * max(
-            0.0, 1.0 - full_throttle_seconds / 31.0
+        estimated_fraction = MAIN_START_FUEL_FRACTION * max(
+            0.0,
+            1.0 - full_throttle_seconds / MAIN_FULL_THROTTLE_FUEL_SECONDS,
         )
         fuel_urgent = estimated_fraction < LOW_FUEL_FRACTION
         if fuel_urgent:
@@ -349,8 +574,22 @@ def run(case: Case) -> Result:
             )
             vertical_net_accel = max(vertical_net_accel, safe_braking_accel)
         vertical_thrust_command = G + vertical_net_accel
+        if sensed_h > TERMINAL_WAYPOINT_HEIGHT:
+            waypoint_vertical_tgo = (
+                2.0 * (sensed_h - TERMINAL_WAYPOINT_HEIGHT)
+                / max(-sensed_vv + TERMINAL_WAYPOINT_VERTICAL_SPEED, 1.0)
+            )
+            waypoint_net_vertical_accel = (
+                -TERMINAL_WAYPOINT_VERTICAL_SPEED - sensed_vv
+            ) / max(waypoint_vertical_tgo, 0.1)
+            vertical_thrust_command = G + waypoint_net_vertical_accel
+        if (
+            sensed_h >= TERMINAL_WAYPOINT_HEIGHT
+            and sensed_vv > -TERMINAL_WAYPOINT_MIN_VERTICAL_SPEED
+        ):
+            vertical_thrust_command = 0.0
         plan_horizontal_height = max(
-            plan_height - TERMINAL_HORIZONTAL_PLAN_END_HEIGHT, 1.0
+            plan_height - plan_end_height, 1.0
         )
         progress = clamp(
             (plan_height - sensed_h) / plan_horizontal_height, 0.0, 1.0
@@ -388,20 +627,116 @@ def run(case: Case) -> Result:
         )
         ax = (
             -d2_error_ds2_x * progress_rate**2
-            + (sensed_x - reference_x) * PLAN_POSITION_GAIN
+            + (waypoint_x - reference_x) * PLAN_POSITION_GAIN
             + (reference_vx - sensed_vx) * PLAN_VELOCITY_GAIN
         )
         az = (
             -d2_error_ds2_z * progress_rate**2
-            + (sensed_z - reference_z) * PLAN_POSITION_GAIN
+            + (waypoint_z - reference_z) * PLAN_POSITION_GAIN
             + (reference_vz - sensed_vz) * PLAN_VELOCITY_GAIN
         )
         ax, az = clamp_vector(ax, az, MAX_HORIZONTAL_ACCEL)
 
+        if sensed_h > plan_end_height:
+            horizontal_vertical_tgo = (
+                2.0 * (sensed_h - TERMINAL_WAYPOINT_HEIGHT)
+                / max(-sensed_vv + TERMINAL_WAYPOINT_VERTICAL_SPEED, 1.0)
+            )
+            horizontal_vertical_net_accel = (
+                -TERMINAL_WAYPOINT_VERTICAL_SPEED - sensed_vv
+            ) / max(horizontal_vertical_tgo, 0.1)
+            horizontal_target_drop = sensed_h - plan_end_height
+            horizontal_target_tgo = horizontal_target_drop / max(-sensed_vv, 1.0)
+            if horizontal_vertical_net_accel > 0.001:
+                horizontal_target_disc = max(
+                    sensed_vv**2
+                    - 2.0 * horizontal_vertical_net_accel
+                    * horizontal_target_drop,
+                    0.0,
+                )
+                horizontal_target_tgo = (
+                    -sensed_vv - math.sqrt(horizontal_target_disc)
+                ) / horizontal_vertical_net_accel
+            horizontal_control_tgo = max(
+                horizontal_target_tgo - TERMINAL_HORIZONTAL_LEAD_SECONDS,
+                0.5,
+            )
+            control_x = waypoint_x - sensed_vx * TERMINAL_HORIZONTAL_LEAD_SECONDS
+            control_z = waypoint_z - sensed_vz * TERMINAL_HORIZONTAL_LEAD_SECONDS
+            ax, az = clamp_vector(
+                control_x * TERMINAL_WAYPOINT_POSITION_COEFFICIENT
+                / max(horizontal_control_tgo**2, 0.25)
+                - sensed_vx * TERMINAL_WAYPOINT_VELOCITY_COEFFICIENT
+                / horizontal_control_tgo,
+                control_z * TERMINAL_WAYPOINT_POSITION_COEFFICIENT
+                / max(horizontal_control_tgo**2, 0.25)
+                - sensed_vz * TERMINAL_WAYPOINT_VELOCITY_COEFFICIENT
+                / horizontal_control_tgo,
+                MAX_HORIZONTAL_ACCEL,
+            )
+            if MAIN_PURE_HORIZONTAL_BRAKE:
+                horizontal_speed = math.hypot(sensed_vx, sensed_vz)
+                if horizontal_speed > 5.0:
+                    ax = -sensed_vx / horizontal_speed * MAX_HORIZONTAL_ACCEL
+                    az = -sensed_vz / horizontal_speed * MAX_HORIZONTAL_ACCEL
+                else:
+                    ax = az = 0.0
+            if MAIN_DIRECT_STOP_GUIDANCE and not high_energy_brake_mode:
+                horizontal_speed = math.hypot(sensed_vx, sensed_vz)
+                if horizontal_speed > 0.1:
+                    velocity_dir_x = sensed_vx / horizontal_speed
+                    velocity_dir_z = sensed_vz / horizontal_speed
+                    along_range = max(
+                        terminal_x * velocity_dir_x
+                        + terminal_z * velocity_dir_z,
+                        0.0,
+                    )
+                    compensated_range = max(
+                        along_range
+                        - horizontal_speed * MAIN_STEERING_RESPONSE_SECONDS
+                        - HORIZONTAL_DEADBAND,
+                        MAIN_DIRECT_STOP_MIN_RANGE,
+                    )
+                    required_decel = horizontal_speed**2 / (
+                        2.0 * compensated_range
+                    ) * MAIN_DIRECT_STOP_DECEL_GAIN
+                    cross_x = terminal_x - velocity_dir_x * along_range
+                    cross_z = terminal_z - velocity_dir_z * along_range
+                    ax = (
+                        -velocity_dir_x * required_decel
+                        + cross_x * MAIN_DIRECT_STOP_CROSS_GAIN
+                    )
+                    az = (
+                        -velocity_dir_z * required_decel
+                        + cross_z * MAIN_DIRECT_STOP_CROSS_GAIN
+                    )
+                    ax, az = clamp_vector(ax, az, MAX_HORIZONTAL_ACCEL)
+            if HIGH_ENERGY_BRAKE_ENABLED and high_energy_brake_mode:
+                desired_vx = 0.0
+                desired_vz = 0.0
+                if (
+                    sensed_h > HIGH_ENERGY_BRAKE_SETTLE_HEIGHT
+                    and terminal_error > HORIZONTAL_DEADBAND
+                ):
+                    desired_speed = min(
+                        HIGH_ENERGY_BRAKE_MAX_SPEED,
+                        (terminal_error - HORIZONTAL_DEADBAND)
+                        * HIGH_ENERGY_BRAKE_POSITION_GAIN,
+                    )
+                    desired_vx = terminal_x / terminal_error * desired_speed
+                    desired_vz = terminal_z / terminal_error * desired_speed
+                ax, az = clamp_vector(
+                    (desired_vx - sensed_vx)
+                    * HIGH_ENERGY_BRAKE_VELOCITY_GAIN,
+                    (desired_vz - sensed_vz)
+                    * HIGH_ENERGY_BRAKE_VELOCITY_GAIN,
+                    HIGH_ENERGY_BRAKE_MAX_ACCEL,
+                )
+
         if horizontal_corridor_mode and (
             capture_align_mode or sensed_h <= TERMINAL_WAYPOINT_HEIGHT
         ):
-            stop_range = max(error - HORIZONTAL_DEADBAND, 0.0)
+            stop_range = max(terminal_error - HORIZONTAL_DEADBAND, 0.0)
             stop_speed = math.sqrt(2.0 * HORIZONTAL_STOP_ACCEL * stop_range)
             pid_horizontal_speed = min(stop_speed, HORIZONTAL_CORRIDOR_SPEED)
             if capture_align_mode:
@@ -411,9 +746,9 @@ def run(case: Case) -> Result:
                     capture_align_speed_limit,
                     stop_range * HORIZONTAL_ALIGN_POSITION_GAIN,
                 )
-            if error > HORIZONTAL_DEADBAND:
-                desired_vx = sensed_x / error * pid_horizontal_speed
-                desired_vz = sensed_z / error * pid_horizontal_speed
+            if terminal_error > HORIZONTAL_DEADBAND:
+                desired_vx = terminal_x / terminal_error * pid_horizontal_speed
+                desired_vz = terminal_z / terminal_error * pid_horizontal_speed
             else:
                 desired_vx, desired_vz = 0.0, 0.0
             velocity_gain = HORIZONTAL_VELOCITY_GAIN
@@ -440,7 +775,7 @@ def run(case: Case) -> Result:
         if (
             not horizontal_settle_mode
             and capture_align_mode
-            and error <= HORIZONTAL_ALIGN_SETTLE_ENTRY_RANGE
+            and terminal_error <= HORIZONTAL_ALIGN_SETTLE_ENTRY_RANGE
             and math.hypot(sensed_vx, sensed_vz)
             <= HORIZONTAL_ALIGN_SETTLE_ENTRY_SPEED
         ):
@@ -449,17 +784,17 @@ def run(case: Case) -> Result:
             filtered_az = 0.0
         if horizontal_settle_mode and sensed_h > TERMINAL_WAYPOINT_HEIGHT:
             ax, az = clamp_vector(
-                sensed_x * HORIZONTAL_ALIGN_SETTLE_POSITION_GAIN
+                terminal_x * HORIZONTAL_ALIGN_SETTLE_POSITION_GAIN
                 - sensed_vx * HORIZONTAL_ALIGN_SETTLE_VELOCITY_GAIN,
-                sensed_z * HORIZONTAL_ALIGN_SETTLE_POSITION_GAIN
+                terminal_z * HORIZONTAL_ALIGN_SETTLE_POSITION_GAIN
                 - sensed_vz * HORIZONTAL_ALIGN_SETTLE_VELOCITY_GAIN,
                 HORIZONTAL_ALIGN_SETTLE_MAX_ACCEL,
             )
-            if error > HORIZONTAL_ALIGN_REACQUIRE_RANGE:
+            if terminal_error > HORIZONTAL_ALIGN_REACQUIRE_RANGE:
                 ax, az = clamp_vector(
-                    sensed_x * HORIZONTAL_ALIGN_REACQUIRE_POSITION_GAIN
+                    terminal_x * HORIZONTAL_ALIGN_REACQUIRE_POSITION_GAIN
                     - sensed_vx * HORIZONTAL_ALIGN_SETTLE_VELOCITY_GAIN,
-                    sensed_z * HORIZONTAL_ALIGN_REACQUIRE_POSITION_GAIN
+                    terminal_z * HORIZONTAL_ALIGN_REACQUIRE_POSITION_GAIN
                     - sensed_vz * HORIZONTAL_ALIGN_SETTLE_VELOCITY_GAIN,
                     HORIZONTAL_ALIGN_REACQUIRE_MAX_ACCEL,
                 )
@@ -481,7 +816,9 @@ def run(case: Case) -> Result:
                 MAX_HORIZONTAL_ACCEL,
             )
 
-        estimated_tilt = math.atan2(math.hypot(actual_ax, actual_az), G)
+        estimated_tilt = math.atan2(
+            math.hypot(actual_dir_x, actual_dir_z), actual_dir_up
+        )
         if (
             final_align_mode
             and not final_descent_armed
@@ -567,6 +904,7 @@ def run(case: Case) -> Result:
                 FINAL_CAPTURE_MAX_ACCEL,
             )
 
+
         current_accel_filter = TERMINAL_ACCEL_FILTER
         if horizontal_corridor_mode and sensed_h > TERMINAL_WAYPOINT_HEIGHT:
             current_accel_filter = TERMINAL_HIGH_ENERGY_ACCEL_FILTER
@@ -583,9 +921,9 @@ def run(case: Case) -> Result:
         vertical_thrust_command = clamp(
             vertical_thrust_command,
             0.0,
-            case.available_accel * TERMINAL_NOMINAL_THRUST_FRACTION,
+            available_accel * TERMINAL_NOMINAL_THRUST_FRACTION,
         )
-        altitude_blend = clamp(sensed_h / 800.0, 0.0, 1.0)
+        altitude_blend = clamp((sensed_h - 500.0) / 1500.0, 0.0, 1.0)
         tilt_limit = math.radians(
             ENTRY_MAX_TILT * altitude_blend
             + LANDING_MAX_TILT * (1.0 - altitude_blend)
@@ -594,6 +932,10 @@ def run(case: Case) -> Result:
             horizontal_corridor_mode
             and math.hypot(ax, az) > 0.01
             and sensed_h > 500.0
+            and (
+                sensed_h < TERMINAL_WAYPOINT_HEIGHT
+                or sensed_vv <= -TERMINAL_WAYPOINT_MIN_VERTICAL_SPEED
+            )
         ):
             # Reserve enough vertical thrust component to realise the allowed
             # tilt during the main translation.  Below 500 m the online loop
@@ -602,9 +944,7 @@ def run(case: Case) -> Result:
             required_vertical_for_tilt = math.hypot(ax, az) / max(
                 math.tan(tilt_limit), 0.01
             )
-            coupling_min_down_speed = TERMINAL_WAYPOINT_VERTICAL_SPEED * max(
-                sensed_h / TERMINAL_WAYPOINT_HEIGHT, 1.0
-            ) ** 0.25
+            coupling_min_down_speed = TERMINAL_WAYPOINT_VERTICAL_SPEED
             coupling_blend = clamp(
                 (-sensed_vv - coupling_min_down_speed)
                 / TERMINAL_DESCENT_COUPLING_BAND,
@@ -617,7 +957,7 @@ def run(case: Case) -> Result:
             ) * coupling_blend
             vertical_thrust_command = min(
                 coupled_vertical_thrust,
-                case.available_accel * TERMINAL_NOMINAL_THRUST_FRACTION,
+                available_accel * TERMINAL_NOMINAL_THRUST_FRACTION,
             )
         max_horizontal_accel = max(vertical_thrust_command, G * 0.2) * math.tan(tilt_limit)
         ax, az = clamp_vector(ax, az, max_horizontal_accel)
@@ -668,9 +1008,10 @@ def run(case: Case) -> Result:
                 max_velocity_cone_angle, commanded_angle
             )
 
-        total_thrust_limit = (
-            case.available_accel * TERMINAL_TOTAL_THRUST_FRACTION
-        )
+        total_thrust_fraction = TERMINAL_TOTAL_THRUST_FRACTION
+        if sensed_h > TERMINAL_WAYPOINT_HEIGHT:
+            total_thrust_fraction = TERMINAL_NOMINAL_THRUST_FRACTION
+        total_thrust_limit = available_accel * total_thrust_fraction
         thrust_magnitude = math.sqrt(vertical_thrust_command**2 + ax**2 + az**2)
         if thrust_magnitude > total_thrust_limit:
             scale = total_thrust_limit / thrust_magnitude
@@ -678,20 +1019,193 @@ def run(case: Case) -> Result:
             ax *= scale
             az *= scale
             thrust_magnitude = total_thrust_limit
+        steering_magnitude = thrust_magnitude
+        if steering_magnitude > 1e-6:
+            steering_dir_up = vertical_thrust_command / steering_magnitude
+            steering_dir_x = ax / steering_magnitude
+            steering_dir_z = az / steering_magnitude
+        else:
+            steering_dir_up = actual_dir_up
+            steering_dir_x = actual_dir_x
+            steering_dir_z = actual_dir_z
+        steering_surface_speed = math.sqrt(
+            sensed_vv * sensed_vv
+            + sensed_vx * sensed_vx
+            + sensed_vz * sensed_vz
+        )
+        horizontal_command = math.hypot(ax, az)
+        if (
+            sensed_h > TERMINAL_WAYPOINT_HEIGHT
+            and sensed_h <= VERTICAL_RECOVERY_PRELEAD_HEIGHT
+            and steering_surface_speed
+            >= VERTICAL_RECOVERY_STEERING_MAX_SURFACE_SPEED
+            and steering_surface_speed
+            < VERTICAL_RECOVERY_PRELEAD_MAX_SURFACE_SPEED
+            and horizontal_command > 1e-6
+        ):
+            retro_up = -sensed_vv / steering_surface_speed
+            retro_x = -sensed_vx / steering_surface_speed
+            retro_z = -sensed_vz / steering_surface_speed
+            horizontal_dir_x = ax / horizontal_command
+            horizontal_dir_z = az / horizontal_command
+            turn_dot = horizontal_dir_x * retro_x + horizontal_dir_z * retro_z
+            turn_up = -retro_up * turn_dot
+            turn_x = horizontal_dir_x - retro_x * turn_dot
+            turn_z = horizontal_dir_z - retro_z * turn_dot
+            turn_magnitude = math.sqrt(
+                turn_up * turn_up + turn_x * turn_x + turn_z * turn_z
+            )
+            if turn_magnitude > 1e-6:
+                prelead_angle = math.radians(
+                    VERTICAL_RECOVERY_PRELEAD_DEGREES
+                )
+                steering_dir_up = (
+                    retro_up * math.cos(prelead_angle)
+                    + turn_up / turn_magnitude * math.sin(prelead_angle)
+                )
+                steering_dir_x = (
+                    retro_x * math.cos(prelead_angle)
+                    + turn_x / turn_magnitude * math.sin(prelead_angle)
+                )
+                steering_dir_z = (
+                    retro_z * math.cos(prelead_angle)
+                    + turn_z / turn_magnitude * math.sin(prelead_angle)
+                )
+        if (
+            sensed_h > TERMINAL_WAYPOINT_HEIGHT
+            and sensed_h <= HIGH_ENERGY_BRAKE_ARM_HEIGHT
+            and sensed_vv > -VERTICAL_RECOVERY_STEERING_SPEED
+            and steering_surface_speed
+            < VERTICAL_RECOVERY_STEERING_MAX_SURFACE_SPEED
+            and horizontal_command > 1e-6
+            and VERTICAL_RECOVERY_STEERING_DEGREES > 0.0
+        ):
+            recovery_angle = math.radians(
+                VERTICAL_RECOVERY_STEERING_DEGREES
+            )
+            steering_dir_up = -math.sin(recovery_angle)
+            steering_dir_x = (
+                ax / horizontal_command * math.cos(recovery_angle)
+            )
+            steering_dir_z = (
+                az / horizontal_command * math.cos(recovery_angle)
+            )
+        waypoint_trim_active = False
+        if waypoint_coast_mode and sensed_h > TERMINAL_WAYPOINT_HEIGHT:
+            horizontal_speed = math.hypot(sensed_vx, sensed_vz)
+            trim_ax = trim_az = 0.0
+            if horizontal_speed > 0.1:
+                velocity_dir_x = sensed_vx / horizontal_speed
+                velocity_dir_z = sensed_vz / horizontal_speed
+                along_range = max(
+                    sensed_x * velocity_dir_x + sensed_z * velocity_dir_z,
+                    0.0,
+                )
+                brake_range = max(
+                    along_range - HORIZONTAL_DEADBAND,
+                    1.0,
+                )
+                required_decel = horizontal_speed**2 / (2.0 * brake_range)
+                projection = (
+                    sensed_x * velocity_dir_x + sensed_z * velocity_dir_z
+                )
+                cross_x = sensed_x - velocity_dir_x * projection
+                cross_z = sensed_z - velocity_dir_z * projection
+                trim_ax, trim_az = clamp_vector(
+                    -velocity_dir_x * required_decel
+                        + cross_x * WAYPOINT_TRIM_CROSS_GAIN,
+                    -velocity_dir_z * required_decel
+                        + cross_z * WAYPOINT_TRIM_CROSS_GAIN,
+                    WAYPOINT_TRIM_MAX_ACCEL,
+                )
+            elif math.hypot(sensed_x, sensed_z) > 30.0:
+                trim_ax, trim_az = clamp_vector(
+                    sensed_x * WAYPOINT_TRIM_POSITION_GAIN,
+                    sensed_z * WAYPOINT_TRIM_POSITION_GAIN,
+                    WAYPOINT_TRIM_MAX_ACCEL,
+                )
+            vertical_thrust_command = 0.0
+            ax, az = trim_ax, trim_az
+            thrust_magnitude = math.hypot(ax, az)
+            if thrust_magnitude > 1e-6:
+                steering_dir_up = 0.0
+                steering_dir_x = ax / thrust_magnitude
+                steering_dir_z = az / thrust_magnitude
+            actual_tilt = math.acos(clamp(actual_dir_up, -1.0, 1.0))
+            waypoint_trim_active = (
+                math.hypot(sensed_x, sensed_z) <= WAYPOINT_TRIM_ARM_RANGE
+                and actual_tilt >= WAYPOINT_TRIM_MIN_ACTUAL_TILT
+                and (
+                    horizontal_speed > WAYPOINT_COAST_MAX_HORIZONTAL_SPEED
+                    or math.hypot(sensed_x, sensed_z) > 30.0
+                )
+            )
+        if sensed_h > TERMINAL_WAYPOINT_HEIGHT and MAIN_PWM_ENABLED:
+            duty = clamp(
+                thrust_magnitude / max(total_thrust_limit, 0.001),
+                0.0,
+                1.0,
+            )
+            main_pwm_accumulator += duty
+            if main_pwm_accumulator >= 1.0 and thrust_magnitude > 1e-6:
+                scale = total_thrust_limit / thrust_magnitude
+                vertical_thrust_command *= scale
+                ax *= scale
+                az *= scale
+                thrust_magnitude = total_thrust_limit
+                main_pwm_accumulator -= 1.0
+            else:
+                vertical_thrust_command = 0.0
+                ax = az = 0.0
+                thrust_magnitude = 0.0
+        if (
+            waypoint_coast_mode
+            and sensed_h > TERMINAL_WAYPOINT_HEIGHT
+            and not waypoint_trim_active
+        ):
+            vertical_thrust_command = 0.0
+            ax = az = 0.0
+            thrust_magnitude = 0.0
         full_throttle_seconds += (
-            thrust_magnitude / max(case.available_accel, 0.001) * DT
+            thrust_magnitude / max(available_accel, 0.001) * DT
         )
 
-        vertical_accel = vertical_thrust_command - G
+        # Apply attitude lag to the unit thrust direction, then multiply it by
+        # the current engine magnitude.  A zero-throttle PWM frame therefore
+        # produces exactly zero force while steering continues to converge.
+        steering_response_seconds = (
+            MAIN_STEERING_RESPONSE_SECONDS
+            if sensed_h > TERMINAL_WAYPOINT_HEIGHT
+            else TERMINAL_STEERING_RESPONSE_SECONDS
+        )
+        response = DT / (steering_response_seconds + DT)
+        actual_dir_up += (steering_dir_up - actual_dir_up) * response
+        actual_dir_x += (steering_dir_x - actual_dir_x) * response
+        actual_dir_z += (steering_dir_z - actual_dir_z) * response
+        actual_dir_magnitude = math.sqrt(
+            actual_dir_up**2 + actual_dir_x**2 + actual_dir_z**2
+        )
+        actual_dir_up /= max(actual_dir_magnitude, 1e-9)
+        actual_dir_x /= max(actual_dir_magnitude, 1e-9)
+        actual_dir_z /= max(actual_dir_magnitude, 1e-9)
+        actual_vertical_thrust = actual_dir_up * thrust_magnitude
+        actual_ax = actual_dir_x * thrust_magnitude
+        actual_az = actual_dir_z * thrust_magnitude
 
-        # The full-size KSP stage takes roughly 1.5 s to turn a lateral command
-        # into acceleration. This deliberately harsh lag reproduces the phase
-        # delay which the earlier point-mass regression hid.
-        response = DT / (1.5 + DT)
-        actual_ax += (ax - actual_ax) * response
-        actual_az += (az - actual_az) * response
+        if trace and sensed_h < 4000.0 and step % 10 == 0:
+            sensed_horizontal_speed = math.hypot(sensed_vx, sensed_vz)
+            actual_brake_accel = -(
+                actual_ax * sensed_vx + actual_az * sensed_vz
+            ) / max(sensed_horizontal_speed, 0.1)
+            print(
+                f"h={sensed_h:7.1f} vv={sensed_vv:7.1f} "
+                f"err={math.hypot(sensed_x, sensed_z):7.1f} "
+                f"hv={sensed_horizontal_speed:6.1f} "
+                f"actual_brake={actual_brake_accel:6.1f} "
+                f"dir_up={actual_dir_up:6.3f} thrust={thrust_magnitude:6.1f}"
+            )
 
-        vv += (vertical_accel + vertical_drag) * DT
+        vv += (actual_vertical_thrust - G + vertical_drag) * DT
         vx += (actual_ax + drag_ax) * DT
         vz += (actual_az + drag_az) * DT
         h += vv * DT
@@ -707,6 +1221,18 @@ def run(case: Case) -> Result:
             waypoint_vertical_speed = vv
             waypoint_lateral_speed = math.hypot(vx, vz)
             waypoint_error = current_error
+            if stop_at_waypoint:
+                return Result(
+                    False, now, vv, waypoint_lateral_speed, waypoint_error,
+                    minimum_height, hover_time,
+                    math.hypot(cable_x - x, cable_z - z),
+                    ignition_height, full_throttle_seconds,
+                    rebound_after_center,
+                    waypoint_vertical_speed=waypoint_vertical_speed,
+                    waypoint_lateral_speed=waypoint_lateral_speed,
+                    waypoint_error=waypoint_error,
+                    max_velocity_cone_angle=max_velocity_cone_angle,
+                )
         # Match the flight verifier: once the stage enters the 10 m centre
         # neighbourhood anywhere below 5 km, a later excursion is rebound.
         # Starting this audit above the 2 km waypoint catches a fast centre
@@ -816,33 +1342,92 @@ def cases(seed: int = 20260710, count: int = 250) -> list[Case]:
             # the old braking level while retaining correction headroom.
             available_accel=rng.uniform(56.25, 81.25),
             sensor_delay=rng.uniform(0, 0.08),
+            start_powered=True,
         ))
     for _ in range(medium_count):
         angle = rng.uniform(-math.pi, math.pi)
-        height = rng.uniform(9000, 10000)
-        vertical_speed = rng.uniform(-540, -430)
-        along_speed = rng.uniform(90, 140)
-        cross_speed = rng.uniform(-15, 15)
+        vertical_speed = rng.uniform(-650, -580)
+        along_speed = rng.uniform(850, 950)
+        cross_speed = rng.uniform(-20, 20)
         direction_x = math.cos(angle)
         direction_z = math.sin(angle)
-        tgo = (
-            vertical_speed
-            + math.sqrt(vertical_speed**2 + 2.0 * G * height)
+        available_accel = rng.uniform(88.0, 94.0)
+        nominal_accel = available_accel * TERMINAL_NOMINAL_THRUST_FRACTION
+        burn_dv_vertical = -TERMINAL_WAYPOINT_VERTICAL_SPEED - vertical_speed
+        burn_dv_squared = burn_dv_vertical**2 + along_speed**2 + cross_speed**2
+        quadratic_a = G**2 - nominal_accel**2
+        quadratic_b = 2.0 * G * burn_dv_vertical
+        discriminant = max(
+            quadratic_b**2 - 4.0 * quadratic_a * burn_dv_squared, 0.0
+        )
+        burn_time = max(
+            (-quadratic_b - math.sqrt(discriminant)) / (2.0 * quadratic_a),
+            0.0,
+        )
+        planned_burn_time = burn_time + TERMINAL_GUIDANCE_RESPONSE_SECONDS
+        burn_drop = max(
+            -(vertical_speed - TERMINAL_WAYPOINT_VERTICAL_SPEED)
+            * 0.5 * planned_burn_time,
+            0.0,
+        )
+        ignition_height = (
+            TERMINAL_WAYPOINT_HEIGHT
+            + burn_drop * TERMINAL_IGNITION_SAFETY
+            + TERMINAL_IGNITION_MARGIN
+        )
+        vertical_net_accel = (
+            -TERMINAL_WAYPOINT_VERTICAL_SPEED - vertical_speed
+        ) / max(planned_burn_time, 0.1)
+        horizontal_burn_drop = max(
+            ignition_height - PLATFORM_FOOTPRINT_PLAN_END_HEIGHT, 0.0
+        )
+        horizontal_burn_time = horizontal_burn_drop / max(-vertical_speed, 1.0)
+        if vertical_net_accel > 0.001:
+            horizontal_time_disc = max(
+                vertical_speed**2
+                - 2.0 * vertical_net_accel * horizontal_burn_drop,
+                0.0,
+            )
+            horizontal_burn_time = (
+                -vertical_speed - math.sqrt(horizontal_time_disc)
+            ) / vertical_net_accel
+        horizontal_burn_time = clamp(
+            horizontal_burn_time, 0.0, planned_burn_time
+        )
+        # Start on the solved powered footprint.  Noise represents the residual
+        # after the 24/20/16 km checkpoint pulses, not an uncorrected ballistic
+        # impact point from the retired continuous-burn design.
+        ignition_distance = (
+            along_speed * 0.5
+            * (horizontal_burn_time + TERMINAL_HORIZONTAL_FOOTPRINT_LAG_SECONDS)
+            + TERMINAL_WAYPOINT_APPROACH_OFFSET
+            + PLATFORM_FOOTPRINT_DOWNRANGE_BIAS
+            + rng.uniform(-100, 100)
+        )
+        # Begin after the last 16 km checkpoint so the regression exercises the
+        # new horizontal stopping-distance ignition gate and coast pre-alignment
+        # instead of spawning directly at the former vertical-only gate.
+        height = 15000.0
+        start_vertical_speed = vertical_speed + 40.0
+        coast_drop = max(height - ignition_height, 0.0)
+        start_down_speed = -start_vertical_speed
+        coast_time = (
+            -start_down_speed
+            + math.sqrt(start_down_speed**2 + 2.0 * G * coast_drop)
         ) / G
-        # Dense lower air removes part of this displacement.  The online
-        # predictor measures the exact KSP value; 0.8 plus noise is the offline
-        # uncertainty envelope around that estimate.
-        distance = along_speed * tgo * 0.8 + rng.uniform(-250, 250)
-        cross_offset = rng.uniform(-120, 120)
+        start_along_speed = along_speed + 30.0
+        distance = ignition_distance + start_along_speed * coast_time
+        cross_offset = rng.uniform(-50, 50)
         result.append(Case(
             height=height,
-            vertical_speed=vertical_speed,
+            vertical_speed=start_vertical_speed,
             x=distance * direction_x - cross_offset * direction_z,
             z=distance * direction_z + cross_offset * direction_x,
-            vx=along_speed * direction_x - cross_speed * direction_z,
-            vz=along_speed * direction_z + cross_speed * direction_x,
-            available_accel=rng.uniform(56.25, 81.25),
+            vx=start_along_speed * direction_x - cross_speed * direction_z,
+            vz=start_along_speed * direction_z + cross_speed * direction_x,
+            available_accel=available_accel,
             sensor_delay=rng.uniform(0, 0.08),
+            start_powered=False,
         ))
     # The last third exercises the mandatory 2 km handover envelope.  The
     # 30 km-to-2 km segment depends on KSP aerodynamics, kOS instruction timing
@@ -855,13 +1440,13 @@ def cases(seed: int = 20260710, count: int = 250) -> list[Case]:
         angle = rng.uniform(-math.pi, math.pi)
         direction_x = math.cos(angle)
         direction_z = math.sin(angle)
-        height = rng.uniform(2000, 5000)
-        vertical_speed = (
-            -height * TERMINAL_WAYPOINT_VERTICAL_SPEED
-            / TERMINAL_WAYPOINT_HEIGHT * rng.uniform(0.85, 1.05)
+        height = rng.uniform(1900, 1995)
+        vertical_speed = -rng.uniform(
+            TERMINAL_WAYPOINT_MIN_VERTICAL_SPEED,
+            TERMINAL_WAYPOINT_MAX_VERTICAL_SPEED,
         )
-        along_speed = rng.uniform(0, 20)
-        distance = rng.uniform(0, 100)
+        along_speed = rng.uniform(0, 5)
+        distance = rng.uniform(0, 30)
         result.append(Case(
             height=height,
             vertical_speed=vertical_speed,
@@ -871,12 +1456,20 @@ def cases(seed: int = 20260710, count: int = 250) -> list[Case]:
             vz=along_speed * direction_z,
             available_accel=rng.uniform(70, 100),
             sensor_delay=rng.uniform(0, 0.08),
+            start_powered=True,
         ))
     return result
 
 
 def main() -> int:
-    results = [run(case) for case in cases()]
+    case_list = cases()
+    results = [run(case) for case in case_list]
+    low_count = len(results) // 3
+    medium_count = len(results) // 3
+    medium_results = results[low_count:low_count + medium_count]
+    downstream_results = (
+        results[:low_count] + results[low_count + medium_count:]
+    )
     successes = [result for result in results if result.captured]
     print(f"capture_rate={len(successes)}/{len(results)} ({len(successes) / len(results):.1%})")
     if successes:
@@ -891,11 +1484,38 @@ def main() -> int:
     failures = [result for result in results if not result.captured]
     for result in failures[:5]:
         print("failure", result)
-    # This broad Monte-Carlo gate is intentionally below 100%; point-mass cases at
-    # the low-TWR/high-delay corner identify the envelope rather than hide it.
-    stable_successes = [r for r in successes if r.rebound_after_center <= 8.0]
-    print(f"stable_capture_rate={len(stable_successes)}/{len(results)}")
-    return 0 if len(stable_successes) >= int(len(results) * 0.90) else 1
+    waypoint_successes = [
+        r for r in medium_results
+        if TERMINAL_WAYPOINT_MIN_VERTICAL_SPEED
+        <= abs(r.waypoint_vertical_speed)
+        <= TERMINAL_WAYPOINT_MAX_VERTICAL_SPEED
+        and r.waypoint_lateral_speed <= 5.0
+        and r.waypoint_error <= 30.0
+    ]
+    print(
+        f"waypoint_compliance={len(waypoint_successes)}/"
+        f"{len(medium_results)}"
+    )
+    stable_successes = [
+        r for r in downstream_results if r.rebound_after_center <= 8.0
+    ]
+    official_rebound_successes = [
+        r for r in downstream_results if r.rebound_after_center <= 30.0
+    ]
+    print(
+        f"downstream_stable_rate={len(stable_successes)}/"
+        f"{len(downstream_results)}"
+    )
+    print(
+        f"downstream_rebound_compliance={len(official_rebound_successes)}/"
+        f"{len(downstream_results)}"
+    )
+    return 0 if (
+        len(successes) == len(results)
+        and len(waypoint_successes) >= int(len(medium_results) * 0.95)
+        and len(official_rebound_successes) == len(downstream_results)
+        and len(stable_successes) >= int(len(downstream_results) * 0.90)
+    ) else 1
 
 
 if __name__ == "__main__":

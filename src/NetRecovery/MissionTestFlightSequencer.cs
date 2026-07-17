@@ -53,6 +53,14 @@ namespace CZ10BNetRecovery
         private float upperBurnTransitionAt;
         private bool upperBurnRetryUsed;
         private bool upperCircularizationCommitted;
+        private double upperSeparationUt = -1d;
+        private double upperFirstThrustUt = -1d;
+        private double upperIgnitionDelay = double.MaxValue;
+        private bool thermalEntryBurnSeen;
+        private bool thermalEntryCutoffRecorded;
+        private float thermalEntryCutoffHorizontalSpeed = float.MaxValue;
+        private bool nominalMainBurnSeen;
+        private bool nominalMainBurnThrottleViolation;
         private bool seaStationDeferred;
         private Quaternion seaSurfaceRotationOffset = Quaternion.identity;
         private float maxCaptureHorizontalOffset;
@@ -186,6 +194,46 @@ namespace CZ10BNetRecovery
                     .Select(p => p.FindModuleImplementing<ModuleEngines>())
                     .FirstOrDefault(e => e != null);
                 everPowered |= engine != null && engine.finalThrust > 10f;
+                if (upperSeparated && booster.verticalSpeed < 0d &&
+                    booster.altitude <= 30050d && booster.altitude > 2000d &&
+                    !thermalEntryCutoffRecorded)
+                {
+                    float entryThrust = engine == null ? 0f : engine.finalThrust;
+                    if (!thermalEntryBurnSeen && entryThrust > 10f)
+                    {
+                        thermalEntryBurnSeen = true;
+                        Debug.Log(string.Format(
+                            "[CZ10BNetRecovery] ENTRY_THERMAL_BURN_START altitude={0:F0} horizontal={1:F1}",
+                            booster.altitude, booster.horizontalSrfSpeed));
+                    }
+                    else if (thermalEntryBurnSeen && entryThrust < 1f)
+                    {
+                        thermalEntryCutoffRecorded = true;
+                        thermalEntryCutoffHorizontalSpeed =
+                            (float)booster.horizontalSrfSpeed;
+                        Debug.Log(string.Format(
+                            "[CZ10BNetRecovery] ENTRY_THERMAL_CUTOFF altitude={0:F0} horizontal={1:F1}",
+                            booster.altitude,
+                            thermalEntryCutoffHorizontalSpeed));
+                    }
+                }
+                if (thermalEntryCutoffRecorded && booster.verticalSpeed < 0d &&
+                    booster.altitude > 2000d)
+                {
+                    float commandedThrottle = booster.ctrlState.mainThrottle;
+                    if (!nominalMainBurnSeen && commandedThrottle >= 0.70f &&
+                        commandedThrottle <= 0.80f)
+                    {
+                        nominalMainBurnSeen = true;
+                        Debug.Log(string.Format(
+                            "[CZ10BNetRecovery] MAIN_BURN_75_START altitude={0:F0} vertical={1:F1} horizontal={2:F1}",
+                            booster.altitude, booster.verticalSpeed,
+                            booster.horizontalSrfSpeed));
+                    }
+                    if (nominalMainBurnSeen && commandedThrottle > 0.01f &&
+                        (commandedThrottle < 0.73f || commandedThrottle > 0.77f))
+                        nominalMainBurnThrottleViolation = true;
+                }
             }
             Vessel upper = FindVesselWithPart("CZ10B-DemoUpperStage");
             bool separatedNow = upper != null && booster != null && upper != booster;
@@ -255,11 +303,23 @@ namespace CZ10BNetRecovery
             if (separatedNow && !upperSeparated)
             {
                 upperSeparated = true;
+                upperSeparationUt = Planetarium.GetUniversalTime();
                 separationPropellantFraction = BoosterPropellantFraction(booster);
                 Debug.Log(string.Format(
                     "[CZ10BNetRecovery] STAGE_RESERVE fraction={0:F4} altitude={1:F0} speed={2:F1} mass={3:F3}",
                     separationPropellantFraction, booster.altitude,
                     booster.srfSpeed, booster.GetTotalMass()));
+            }
+            if (separatedNow && upperSeparationUt >= 0d &&
+                upperFirstThrustUt < 0d && UpperStageThrust(upper) > 1f)
+            {
+                upperFirstThrustUt = Planetarium.GetUniversalTime();
+                upperIgnitionDelay = System.Math.Max(
+                    upperFirstThrustUt - upperSeparationUt, 0d);
+                Debug.Log(string.Format(
+                    "[CZ10BNetRecovery] UPPER_STAGE_FIRST_THRUST delay={0:F2}s apoapsis={1:F0}",
+                    upperIgnitionDelay,
+                    upper.orbit == null ? -1d : upper.orbit.ApA));
             }
 
             ModuleCatchNet captureNet = FindNet();
@@ -333,7 +393,15 @@ namespace CZ10BNetRecovery
                     Report(separationPropellantFraction >= 0f &&
                            separationPropellantFraction <= 0.205f &&
                            maxAscentCoastAngularRate <= 5f &&
+                           upperFirstThrustUt >= 0d &&
+                           upperIgnitionDelay <= 5d &&
+                           thermalEntryBurnSeen &&
+                           thermalEntryCutoffRecorded &&
+                           thermalEntryCutoffHorizontalSpeed <= 1005f &&
+                           nominalMainBurnSeen &&
+                           !nominalMainBurnThrottleViolation &&
                            terminalWaypointRecorded &&
+                           terminalWaypointVerticalSpeed >= 150f &&
                            terminalWaypointVerticalSpeed <= 200f &&
                            terminalWaypointHorizontalSpeed <= 5f &&
                            terminalWaypointHorizontalError <= 30d &&
@@ -468,11 +536,14 @@ namespace CZ10BNetRecovery
             Vessel booster = FindVesselWithPart("CZ10B-DemoBooster");
             float landingFraction = BoosterPropellantFraction(booster);
             string detail = string.Format(
-                " powered={0} high={1} separated={2} hook={3} maxHighAngular={4:F2} separationReserve={5:F4} landingReserve={6:F4} maxAscentCoastAngular={7:F2} waypointRecorded={8} waypointVertical={9:F2} waypointHorizontal={10:F2} waypointError={11:F1} maxNozzleVelocityAngle={12:F2} centerSeen={13} reboundAfterCenter={14:F1} maxCaptureOffset={15:F2} stableRequired={16:F0} maxAngularBelow1000={17:F2} maxAngularBelow500={18:F2} maxRawAngularBelow1000={19:F2} maxRawAngularBelow500={20:F2}",
+                " powered={0} high={1} separated={2} hook={3} maxHighAngular={4:F2} separationReserve={5:F4} landingReserve={6:F4} maxAscentCoastAngular={7:F2} upperIgnitionDelay={8:F2} thermalBurn={9} thermalCutoff={10} thermalCutoffHorizontal={11:F1} mainBurn75={12} mainBurnThrottleViolation={13} waypointRecorded={14} waypointVertical={15:F2} waypointHorizontal={16:F2} waypointError={17:F1} maxNozzleVelocityAngle={18:F2} centerSeen={19} reboundAfterCenter={20:F1} maxCaptureOffset={21:F2} stableRequired={22:F0} maxAngularBelow1000={23:F2} maxAngularBelow500={24:F2} maxRawAngularBelow1000={25:F2} maxRawAngularBelow500={26:F2}",
                 everPowered, reachedAltitude, upperSeparated,
                 hook == null ? "missing" : hook.hookState, maxHighAngularRate,
                 separationPropellantFraction, landingFraction,
-                maxAscentCoastAngularRate, terminalWaypointRecorded,
+                maxAscentCoastAngularRate, upperIgnitionDelay,
+                thermalEntryBurnSeen, thermalEntryCutoffRecorded,
+                thermalEntryCutoffHorizontalSpeed, nominalMainBurnSeen,
+                nominalMainBurnThrottleViolation, terminalWaypointRecorded,
                 terminalWaypointVerticalSpeed,
                 terminalWaypointHorizontalSpeed,
                 terminalWaypointHorizontalError,
@@ -599,20 +670,13 @@ namespace CZ10BNetRecovery
                 startLongitude, platform.altitude);
             seaSurfaceRotationOffset = Quaternion.Inverse(startSurfaceFrame)
                 * platform.transform.rotation;
-            // The slower dense-air turn and 40 km entry burn put the measured
-            // uncorrected footprint about 47.2 degrees east of KSC.  Place the
-            // ship there so the 30 km planner begins inside the same local
-            // surface frame instead of seeing a 200 km curvature error.
-            // The five-second ignition ramp changes the downrange handoff even
-            // though separation altitude, speed and reserve remain nominal. A
-            // full sea flight measured the resulting 2 km footprint at about
-            // longitude -28.907 degrees, 1.214 degrees west of the former deck.
-            // Put the ship on that measured footprint so terminal control owns
-            // only braking/settling, not a physically impossible 12.7 km sprint.
-            // The fixed 30 km trajectory now owns position as well as velocity,
-            // so this measured location is only the physical recovery site;
-            // no longitude bias is used to compensate controller overshoot.
-            const double measuredFootprintOffset = 45.0000d;
+            // The 32 km gravity-turn handoff moves the complete coast-plus-burn
+            // footprint 9.44 km downrange of the former 45-degree site.  This
+            // value comes from ENTRY_CUTOFF before terminal feedback begins, so
+            // the ship is placed on the open-loop trajectory rather than moved
+            // to hide a late controller overshoot.  Checkpoint pulses then own
+            // only atmospheric/model dispersion, not a systematic return leg.
+            const double measuredFootprintOffset = 46.0000d;
             seaLongitude = startLongitude + measuredFootprintOffset;
             seaTerrainAltitude = TerrainAltitude(body, seaLatitude, seaLongitude);
             // One-frame relocation by hundreds of kilometres is clamped by
