@@ -1162,7 +1162,8 @@ UNTIL HOOK_CAPTURED() {
         SET HORIZONTAL_SETTLE_MODE TO TRUE.
         SET FILTERED_H_ACCEL TO V(0,0,0).
     }
-    IF HORIZONTAL_SETTLE_MODE {
+    IF HORIZONTAL_SETTLE_MODE
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
         SET H_ACCEL TO CLAMPV(TERMINAL_CONTROL_H_POS
             * TERMINAL_ALIGN_SETTLE_POSITION_GAIN
             - HORIZONTAL_VEL * TERMINAL_ALIGN_SETTLE_VELOCITY_GAIN,
@@ -1463,9 +1464,9 @@ UNTIL HOOK_CAPTURED() {
             }
         }
         // The primary frozen-axis brake can leave a small perpendicular
-        // velocity.  Correct it with a measured fixed-direction delta-v whose
-        // target is the velocity that ballistically reaches the 2 km centre.
-        // A new direction is selected only after the preceding impulse ends.
+        // velocity.  Correct it with measured fixed-direction delta-v impulses.
+        // Each impulse finishes before a fresh residual direction is selected,
+        // so guidance damps velocity without restoring position pursuit.
         IF WAYPOINT_CENTER_BRAKE_MODE
             AND NOT WAYPOINT_FINAL_COAST_MODE {
             IF WAYPOINT_ENDPOINT_TRIM_ACTIVE {
@@ -1510,6 +1511,44 @@ UNTIL HOOK_CAPTURED() {
         LOCAL WAYPOINT_TRIM_ACCEL IS HORIZONTAL_POS
                 * (6 / WAYPOINT_TRIM_CONTROL_TGO^2)
             - HORIZONTAL_VEL * (4 / WAYPOINT_TRIM_CONTROL_TGO).
+        // The receding-horizon solution can ask for one last acceleration
+        // toward the ship before a mathematically sharper stop.  The long
+        // stage cannot reverse its attitude quickly enough to execute that
+        // final switch: the measured approach slowed to 69 m/s at 149 m,
+        // accelerated back to 137 m/s at 39 m, and then crossed the waypoint
+        // while still turning around.  Once coast/trim owns the approach,
+        // preserve its cross-axis correction but make the closing axis
+        // one-way: it may only brake until the frozen centre-brake latch fires.
+        IF NOT WAYPOINT_CENTER_BRAKE_MODE
+            AND HORIZONTAL_POS:MAG
+                > TERMINAL_WAYPOINT_CENTER_BRAKE_ENTRY_ERROR {
+            LOCAL WAYPOINT_APPROACH_DIRECTION IS
+                HORIZONTAL_POS:NORMALIZED.
+            LOCAL WAYPOINT_APPROACH_SPEED IS VDOT(HORIZONTAL_VEL,
+                WAYPOINT_APPROACH_DIRECTION).
+            IF WAYPOINT_APPROACH_SPEED > 0 {
+                // Aim halfway inside the latch radius so finite sampling cannot
+                // stop just outside it and re-arm inward pursuit.
+                LOCAL WAYPOINT_APPROACH_BRAKE_RANGE IS MAX(
+                    HORIZONTAL_POS:MAG
+                        - TERMINAL_WAYPOINT_CENTER_BRAKE_ENTRY_ERROR / 2,
+                    TERMINAL_WAYPOINT_CENTER_BRAKE_MIN_RANGE).
+                LOCAL WAYPOINT_APPROACH_BRAKE_ACCEL IS
+                    WAYPOINT_APPROACH_SPEED^2
+                    / (2 * WAYPOINT_APPROACH_BRAKE_RANGE)
+                    * TERMINAL_WAYPOINT_APPROACH_BRAKE_GAIN.
+                LOCAL WAYPOINT_APPROACH_ACCEL IS VDOT(
+                    WAYPOINT_TRIM_ACCEL,
+                    WAYPOINT_APPROACH_DIRECTION).
+                IF WAYPOINT_APPROACH_ACCEL
+                    > -WAYPOINT_APPROACH_BRAKE_ACCEL {
+                    SET WAYPOINT_TRIM_ACCEL TO WAYPOINT_TRIM_ACCEL
+                        - WAYPOINT_APPROACH_DIRECTION
+                            * (WAYPOINT_APPROACH_ACCEL
+                                + WAYPOINT_APPROACH_BRAKE_ACCEL).
+                }
+            }
+        }
         IF WAYPOINT_CENTER_BRAKE_MODE {
             IF WAYPOINT_ENDPOINT_TRIM_ACTIVE {
                 LOCAL WAYPOINT_ENDPOINT_REMAINING_DELTA_V IS MAX(
@@ -1534,6 +1573,20 @@ UNTIL HOOK_CAPTURED() {
         SET DESIRED_THRUST TO WAYPOINT_TRIM_ACCEL.
         IF WAYPOINT_TRIM_ACCEL:MAG > 0.1 {
             SET STEERING_THRUST TO WAYPOINT_TRIM_ACCEL.
+            // Once the total speed is below the audited 300 m/s load-cone
+            // boundary, lead the horizontal trim slightly below the horizon if
+            // descent has already become too slow.  Holding a 90-degree target
+            // broadside reduced the measured 2 km descent speed to 79 m/s.
+            IF STEERING_SURFACE_SPEED
+                    < TERMINAL_VELOCITY_CONE_MIN_SPEED
+                AND VERTICAL_V
+                    > -TERMINAL_WAYPOINT_VERTICAL_SPEED {
+                SET STEERING_THRUST TO
+                    WAYPOINT_TRIM_ACCEL:NORMALIZED
+                        * COS(TERMINAL_VERTICAL_RECOVERY_STEERING_DEGREES)
+                    - UP_VEC
+                        * SIN(TERMINAL_VERTICAL_RECOVERY_STEERING_DEGREES).
+            }
         }
         SET WAYPOINT_TRIM_ACTIVE TO
             NOT WAYPOINT_FINAL_COAST_MODE
@@ -1564,6 +1617,8 @@ UNTIL HOOK_CAPTURED() {
                 AND NOT WAYPOINT_POST_UPRIGHT_TRIM_DONE
                 AND HOOK_HEIGHT
                     >= TERMINAL_WAYPOINT_POST_UPRIGHT_MIN_HEIGHT
+                AND HORIZONTAL_VEL:MAG
+                    >= TERMINAL_WAYPOINT_POST_UPRIGHT_ARM_SPEED
                 AND ACTUAL_THRUST_TILT
                     <= TERMINAL_WAYPOINT_POST_UPRIGHT_ARM_TILT {
                 LOCAL WAYPOINT_POST_UPRIGHT_DESIRED_H_VEL IS
@@ -1619,27 +1674,26 @@ UNTIL HOOK_CAPTURED() {
             }
         }
     }
-    // Above the waypoint, WAYPOINT_FINAL_COAST_MODE still owns a pure ballistic
-    // upright coast.  Below it, keep the latched gentle H_SETTLE field active:
-    // a real flight crossed the gate at 24 m / 8.5 m/s, and forcing zero thrust
-    // until 1 km allowed that small outward drift to rebound by 89 m.
+    // The strict 75% pulse train belongs only to the powered trajectory above
+    // the formal 2 km waypoint.  Below it, return to b0ef's continuous throttle
+    // and bounded position/velocity field so a single frame cannot add enough
+    // vertical impulse to reverse the descent.
     LOCAL TILT_CMD IS VANG(STEERING_THRUST, UP_VEC).
     LOCAL THROTTLE_CMD IS CLAMP(SHIP:MASS * DESIRED_THRUST:MAG /
         MAX(SHIP:AVAILABLETHRUST, 0.001), 0, 1).
-    // Every non-zero command after main-burn ignition is exactly 75%, all the
-    // way through capture.  A sigma-delta accumulator represents smaller
-    // requests with zero-throttle frames; limiting this only above 2 km let the
-    // low-altitude controller emit continuous 2-20% commands and violate the
-    // mission's main-burn throttle requirement.
-    LOCAL MAIN_NOMINAL_ACCEL IS AVAILABLE_ACC
-        * TERMINAL_NOMINAL_THRUST_FRACTION.
-    LOCAL MAIN_DUTY IS CLAMP(DESIRED_THRUST:MAG
-        / MAX(MAIN_NOMINAL_ACCEL, 0.001), 0, 1).
-    SET MAIN_PWM_ACCUMULATOR TO MAIN_PWM_ACCUMULATOR + MAIN_DUTY.
-    SET THROTTLE_CMD TO 0.
-    IF MAIN_PWM_ACCUMULATOR >= 1 {
-        SET THROTTLE_CMD TO TERMINAL_NOMINAL_THRUST_FRACTION.
-        SET MAIN_PWM_ACCUMULATOR TO MAIN_PWM_ACCUMULATOR - 1.
+    IF HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
+        LOCAL MAIN_NOMINAL_ACCEL IS AVAILABLE_ACC
+            * TERMINAL_NOMINAL_THRUST_FRACTION.
+        LOCAL MAIN_DUTY IS CLAMP(DESIRED_THRUST:MAG
+            / MAX(MAIN_NOMINAL_ACCEL, 0.001), 0, 1).
+        SET MAIN_PWM_ACCUMULATOR TO MAIN_PWM_ACCUMULATOR + MAIN_DUTY.
+        SET THROTTLE_CMD TO 0.
+        IF MAIN_PWM_ACCUMULATOR >= 1 {
+            SET THROTTLE_CMD TO TERMINAL_NOMINAL_THRUST_FRACTION.
+            SET MAIN_PWM_ACCUMULATOR TO MAIN_PWM_ACCUMULATOR - 1.
+        }
+    } ELSE {
+        SET MAIN_PWM_ACCUMULATOR TO 0.
     }
     IF WAYPOINT_COAST_MODE
         AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
@@ -1650,6 +1704,48 @@ UNTIL HOOK_CAPTURED() {
     LOCK STEERING TO LOOKDIRUP(STEERING_THRUST,
         STEERING_ROLL_REFERENCE).
     LOCK THROTTLE TO THROTTLE_CMD.
+    IF HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
+        AND WAYPOINT_CENTER_BRAKE_MODE
+        AND WAYPOINT_ENDPOINT_TRIM_ACTIVE {
+        // Do not spend an endpoint quantum until the physical thrust direction
+        // will reduce the newly measured horizontal residual.  Steering lag in
+        // the old fixed-axis path turned its last pulse into an acceleration
+        // from 7.46 to 9.92 m/s.
+        LOCAL WAYPOINT_ACTUAL_H_THRUST IS VXCL(UP_VEC,
+            SHIP:FACING:VECTOR).
+        LOCAL WAYPOINT_ENDPOINT_ALIGNED IS
+            WAYPOINT_ACTUAL_H_THRUST:MAG > 0.1
+            AND VANG(WAYPOINT_ACTUAL_H_THRUST,
+                WAYPOINT_ENDPOINT_TRIM_DIRECTION)
+                <= TERMINAL_WAYPOINT_ENDPOINT_ALIGNMENT_DEGREES.
+        IF NOT WAYPOINT_ENDPOINT_ALIGNED {
+            SET THROTTLE_CMD TO 0.
+            LOCK THROTTLE TO 0.
+        } ELSE IF HORIZONTAL_VEL:MAG
+            <= TERMINAL_WAYPOINT_MICRO_PULSE_SPEED {
+            // The loaded two-vessel scene needs about 0.2 s per guidance pass.
+            // Compute a shorter exact-75% quantum from the remaining projected
+            // delta-v, then explicitly release it before the next pass.  This
+            // cannot cross the fixed impulse target even when frame time varies.
+            LOCAL WAYPOINT_ENDPOINT_DV_REMAINING IS MAX(
+                WAYPOINT_ENDPOINT_TRIM_TARGET_PROJECTION
+                    - VDOT(HORIZONTAL_VEL,
+                        WAYPOINT_ENDPOINT_TRIM_DIRECTION), 0).
+            LOCAL WAYPOINT_ENDPOINT_PROJECTED_ACCEL IS AVAILABLE_ACC
+                * TERMINAL_NOMINAL_THRUST_FRACTION
+                * MAX(VDOT(SHIP:FACING:VECTOR,
+                    WAYPOINT_ENDPOINT_TRIM_DIRECTION), 0.001).
+            LOCAL WAYPOINT_ENDPOINT_PULSE_SECONDS IS MIN(
+                TERMINAL_WAYPOINT_MICRO_PULSE_SECONDS,
+                WAYPOINT_ENDPOINT_DV_REMAINING
+                    / WAYPOINT_ENDPOINT_PROJECTED_ACCEL).
+            SET THROTTLE_CMD TO TERMINAL_NOMINAL_THRUST_FRACTION.
+            LOCK THROTTLE TO THROTTLE_CMD.
+            WAIT WAYPOINT_ENDPOINT_PULSE_SECONDS.
+            SET THROTTLE_CMD TO 0.
+            LOCK THROTTLE TO 0.
+        }
+    }
 
     LOCAL GUIDANCE_PHASE IS "TRAJECTORY".
     IF H_CORRIDOR_MODE

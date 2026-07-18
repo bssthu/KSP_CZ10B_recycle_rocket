@@ -77,7 +77,7 @@ SET TERMINAL_ALIGN_ACCEL_VELOCITY_GAIN TO 1.00.
 // it adds braking altitude without cancelling the final inward approach.
 SET TERMINAL_ALIGN_SETTLE_ENTRY_RANGE TO 130.0.
 SET TERMINAL_ALIGN_SETTLE_ENTRY_SPEED TO 13.0.
-SET TERMINAL_ALIGN_SETTLE_VELOCITY_GAIN TO 2.0.
+SET TERMINAL_ALIGN_SETTLE_VELOCITY_GAIN TO 3.5.
 SET TERMINAL_ALIGN_SETTLE_MAX_ACCEL TO 25.0.
 SET TERMINAL_ALIGN_SETTLE_POSITION_GAIN TO 0.20.
 // Reject a genuine centre escape without restoring the full pursuit profile.
@@ -114,11 +114,11 @@ SET FINAL_CAPTURE_MAX_SPEED TO 0.75.
 // The long, nearly empty stage needs a deliberately soft cooked-steering
 // torque loop near the ship.  The default loop follows sub-degree thrust-vector
 // changes too aggressively and produced measured 12.8-18 deg/s rate spikes.
-// Preserve the fast cooked-steering response while the high-energy pulse is
-// still turning the stage.  Switch to the deliberately soft torque loop before
-// the 2 km handoff so bounded drift correction cannot create a rate spike in
-// the powered-flight audit below 1 km.
-SET TERMINAL_STEERING_TUNE_HEIGHT TO 2200.
+// The part exposes extra terminal attitude authority above b0ef's physical
+// wheel torque.  Enter its deliberately soft cooked-steering profile just below
+// the formal 2 km measurement plane; waiting until 1 km produced a measured
+// 61.4 deg/s spike.
+SET TERMINAL_STEERING_TUNE_HEIGHT TO 1950.
 SET TERMINAL_STEERING_PITCH_YAW_TS TO 8.0.
 SET TERMINAL_STEERING_ROLL_TS TO 5.0.
 SET TERMINAL_STEERING_MAX_STOPPING_TIME TO 2.0.
@@ -217,7 +217,10 @@ SET TERMINAL_HIGH_ENERGY_BRAKE_SETTLE_HEIGHT TO 2200.
 // braking still present between 11 km and the formal 2 km waypoint.
 SET TERMINAL_MAIN_ATTITUDE_RESPONSE_SECONDS TO 2.8.
 SET TERMINAL_MAIN_HORIZONTAL_STOP_SAFETY TO 1.0.
-SET TERMINAL_MAIN_DIRECT_STOP_DECEL_GAIN TO 0.45.
+// The heavier upper stage enters the landing burn about 50 m/s faster
+// vertically.  A 0.45 lateral gain left 289 m/s at 4 km and armed endpoint
+// trim a kilometre late; 0.50 restores the historical 42-degree initial vector.
+SET TERMINAL_MAIN_DIRECT_STOP_DECEL_GAIN TO 0.50.
 SET TERMINAL_MAIN_DIRECT_STOP_CROSS_GAIN TO 0.02.
 SET TERMINAL_MAIN_DIRECT_STOP_MIN_RANGE TO 100.
 // Below the 300 m/s load-cone threshold, lead the lagging attitude slightly
@@ -241,7 +244,10 @@ SET TERMINAL_WAYPOINT_COAST_MAX_VERTICAL_SPEED TO 285.
 // Real telemetry reaches the vertical-speed window with enough range to stop,
 // but its coast-only endpoint has already crossed the ship by about 1.3 km.
 // The trim controller below still has to finish inside the strict 30 m gate.
-SET TERMINAL_WAYPOINT_COAST_ENTRY_ERROR TO 1800.
+// Do not hand an infeasible endpoint to the fixed-impulse trim.  The former
+// 1.8 km gate armed with only 3.8 s remaining, then accelerated toward the ship
+// before an unavoidable late reversal.  Keep the handoff inside 1 km.
+SET TERMINAL_WAYPOINT_COAST_ENTRY_ERROR TO 1000.
 SET TERMINAL_WAYPOINT_COAST_ENTRY_HORIZONTAL_SPEED TO 230.
 SET TERMINAL_WAYPOINT_COAST_ENTRY_MIN_VERTICAL_SPEED TO 270.
 // Arm across the complete measured stopping footprint.  Waiting for both an
@@ -259,41 +265,56 @@ SET TERMINAL_WAYPOINT_TRIM_MAX_ACCEL TO 80.
 // makes that entry deterministic instead of relying on overshoot.  Do not add
 // a speed gate here: telemetry showed the complete first pass stayed at
 // 51-53 m/s and would otherwise miss this one-way event.
-SET TERMINAL_WAYPOINT_CENTER_BRAKE_ENTRY_ERROR TO 30.
+// Arm one telemetry sample before the formal 30 m gate.  At 13-27 m/s a
+// 0.2 s guidance pass can otherwise move from just outside 30 m to the far
+// side before the one-way latch observes the entry.
+SET TERMINAL_WAYPOINT_CENTER_BRAKE_ENTRY_ERROR TO 35.
 SET TERMINAL_WAYPOINT_CENTER_BRAKE_SAFETY TO 1.25.
 SET TERMINAL_WAYPOINT_CENTER_BRAKE_VELOCITY_GAIN TO 1.5.
 SET TERMINAL_WAYPOINT_CENTER_BRAKE_MIN_RANGE TO 5.
-// One measured two-axis delta-v removes both the frozen primary speed and its
-// perpendicular residual.  Do not reverse for a second endpoint correction:
-// the long broadside stage retains too much angular momentum for a safe
-// high-dynamic-pressure direction change.
+// Shape the one-way approach without stopping short of the 2 km plane.  A
+// 1.25 multiplier reduced the measured 3.2 km closing speed from 96 to
+// 16 m/s while 175 m still remained.  The 0.70 spatial braking law reaches
+// the 30 m latch with about one 75%-PWM frame of velocity left, so the frozen
+// endpoint impulse can finish the stop without a 180-degree attitude reversal.
+SET TERMINAL_WAYPOINT_APPROACH_BRAKE_GAIN TO 0.70.
+// A full guidance-cycle 75% pulse changes the nearly empty stage by more than
+// the remaining horizontal speed.  Keep every non-zero command at exactly
+// 75%, but shorten each endpoint quantum from the measured remaining delta-v.
+SET TERMINAL_WAYPOINT_MICRO_PULSE_SPEED TO 30.
+SET TERMINAL_WAYPOINT_MICRO_PULSE_SECONDS TO 0.07.
+// Fire endpoint impulses only after the actual horizontal thrust direction is
+// close to the measured residual-velocity stop direction.  This makes every
+// pulse reduce horizontal kinetic energy despite azimuth steering lag.
+SET TERMINAL_WAYPOINT_ENDPOINT_ALIGNMENT_DEGREES TO 20.
 SET TERMINAL_WAYPOINT_ENDPOINT_TRIM_MAX_ACCEL TO 60.
 SET TERMINAL_WAYPOINT_ENDPOINT_TRIM_GAIN TO 3.
 SET TERMINAL_WAYPOINT_ENDPOINT_TRIM_MIN_ACCEL TO 5.
 SET TERMINAL_WAYPOINT_ENDPOINT_TRIM_TOLERANCE TO 0.5.
-// The subsequent 90-to-0 degree coast slew consistently adds about 2.8 m/s
-// outward and 35 m of displacement.  End this single impulse with a small
-// opposite velocity so the measured slew drift, rather than another burn,
-// brings the stage to the formal waypoint.
-SET TERMINAL_WAYPOINT_ENDPOINT_VELOCITY_SCALE TO -0.75.
-SET TERMINAL_WAYPOINT_ENDPOINT_MAX_PULSES TO 1.
-// Keep the aligned post-upright experiment available for diagnostics, but the
-// accepted path compensates the measured slew drift in the single endpoint
-// impulse above.  A second high-altitude turn cost too much vertical speed.
-SET TERMINAL_WAYPOINT_POST_UPRIGHT_ENABLED TO FALSE.
-SET TERMINAL_WAYPOINT_POST_UPRIGHT_MIN_HEIGHT TO 2300.
-SET TERMINAL_WAYPOINT_POST_UPRIGHT_ARM_TILT TO 10.
-SET TERMINAL_WAYPOINT_POST_UPRIGHT_TILT TO 80.
+// Stop the measured velocity rather than baking a flight-specific slew offset
+// into its target.  Up to three newly measured directions remove the small
+// perpendicular residual left by a finite first impulse without position chase.
+SET TERMINAL_WAYPOINT_ENDPOINT_VELOCITY_SCALE TO 0.
+SET TERMINAL_WAYPOINT_ENDPOINT_MAX_PULSES TO 3.
+// Usually the endpoint stop finishes high enough for the broadside-to-upright
+// slew to settle ballistically.  If that slew starts late, however, its aero
+// side force can rebuild more than 8 m/s before the 2 km plane.  Correct only
+// that exceptional residual with one moderate-tilt pulse; normal 0-7 m/s slews
+// remain engine-off and avoid unnecessary vertical impulse.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_ENABLED TO TRUE.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_MIN_HEIGHT TO 2000.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_ARM_TILT TO 45.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_ARM_SPEED TO 8.
+SET TERMINAL_WAYPOINT_POST_UPRIGHT_TILT TO 60.
 SET TERMINAL_WAYPOINT_POST_UPRIGHT_ALIGNMENT_DEGREES TO 10.
 SET TERMINAL_WAYPOINT_POST_UPRIGHT_VELOCITY_SCALE TO 0.
 SET TERMINAL_WAYPOINT_POST_UPRIGHT_MAX_ACCEL TO 20.
 SET TERMINAL_WAYPOINT_POST_UPRIGHT_GAIN TO 2.
 SET TERMINAL_WAYPOINT_POST_UPRIGHT_MIN_ACCEL TO 3.
 SET TERMINAL_WAYPOINT_POST_UPRIGHT_TOLERANCE TO 0.5.
-// A final PWM pulse changes horizontal speed by several metres per second.
-// Once the ballistic 2 km endpoint is inside the strict position gate and the
-// residual speed is this small, latch coast instead of re-arming another pulse.
-SET TERMINAL_WAYPOINT_FINAL_COAST_HORIZONTAL_SPEED TO 5.0.
+// Leave margin for the repeatable drift added while the broadside stage slews
+// upright.  The formal 2 km limit remains 5 m/s after that attitude change.
+SET TERMINAL_WAYPOINT_FINAL_COAST_HORIZONTAL_SPEED TO 1.5.
 // At main ignition, create one height-indexed Hermite path from the measured
 // position and velocity to the recovery frame. Tracking a fixed spatial path
 // avoids the aim-point jumps and alternating corrections caused by replans.

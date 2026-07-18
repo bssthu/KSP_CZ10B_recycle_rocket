@@ -55,6 +55,7 @@ IF SHIP:APOAPSIS < TARGET_APOAPSIS {
 // and use full thrust; the former 10--20% burn started too late, continued far
 // down the descending branch and raised apoapsis much more than periapsis.
 WAIT UNTIL ETA:APOAPSIS <= 20 OR SHIP:VERTICALSPEED < 0.
+SAS OFF.
 LOCK STEERING TO PROGRADE.
 FOR ENGINE IN UPPER_ENGINES { ENGINE:ACTIVATE. }
 LOCK THROTTLE TO 1.
