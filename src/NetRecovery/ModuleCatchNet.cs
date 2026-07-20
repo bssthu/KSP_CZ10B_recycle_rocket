@@ -123,6 +123,19 @@ namespace CZ10BNetRecovery
                 ScreenMessageStyle.UPPER_CENTER);
         }
 
+        internal bool HasFourPointCapture(Vessel candidate)
+        {
+            if (candidate == null)
+                return false;
+            List<ConfigurableJoint> joints;
+            if (!captures.TryGetValue(candidate.id, out joints) || joints == null)
+                return false;
+            return joints.Count(joint => joint != null) >= 4 &&
+                captureTethers.Count(entry => entry.Key != null &&
+                    entry.Value != null &&
+                    entry.Value.vesselId == candidate.id) >= 4;
+        }
+
         public override void OnStart(StartState state)
         {
             base.OnStart(state);
@@ -488,13 +501,31 @@ namespace CZ10BNetRecovery
                 // rendered ropes. Use the live Rigidbody position as the prior
                 // world point so a floating-origin rebase is shared by both ends
                 // and cannot appear as an enormous winch velocity.
+                Vector3 previousLocal = tether.currentLocal;
                 tether.currentLocal = Vector3.MoveTowards(
                     tether.currentLocal, tether.settledLocal,
                     captureSettleSpeed * deltaTime);
-                Vector3 previousPosition = tether.winchBody.position;
                 Vector3 commandedPosition = NetToWorld(tether.currentLocal);
-                tether.commandedVelocity =
-                    (commandedPosition - previousPosition) / deltaTime;
+                // Never infer anchor velocity from world-position deltas.  The
+                // recovery ship's DP controller calls Vessel.SetPosition and
+                // KSP may also shift the floating origin; either discontinuity
+                // used to become a fictitious tens-of-metres-per-second winch
+                // velocity which DampCapturedStages then copied into the stage.
+                // Build the velocity from Kerbin's rotating-frame velocity plus
+                // the intentional payout motion in the live net basis instead.
+                Vector3 right;
+                Vector3 up;
+                Vector3 forward;
+                NetAxes(out right, out up, out forward);
+                Vector3 localVelocity = (tether.currentLocal - previousLocal) /
+                    deltaTime;
+                Vector3 payoutVelocity = right * localVelocity.x +
+                    up * localVelocity.y + forward * localVelocity.z;
+                Vector3 surfaceVelocity = vessel != null &&
+                    vessel.mainBody != null
+                    ? (Vector3)vessel.mainBody.getRFrmVel(commandedPosition)
+                    : Vector3.zero;
+                tether.commandedVelocity = surfaceVelocity + payoutVelocity;
                 tether.currentWorld = commandedPosition;
                 tether.winchBody.MovePosition(commandedPosition);
                 if (tether.controlsAttitude)
