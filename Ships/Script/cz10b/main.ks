@@ -446,16 +446,18 @@ LOCAL MIDCOURSE_LAST_STEERING IS V(0,0,0).
 LOCAL BALLISTIC_TERMINAL_WHEEL_ENABLED IS
     SET_BOOSTER_REACTION_WHEEL_AUTHORITY(
         BOOSTER_TERMINAL_REACTION_WHEEL_AUTHORITY).
-// Entry aerodynamics have completed their only required job.  Continuing to
-// fly the four grid fins at the main-burn angle of attack creates a large lift
-// vector in addition to engine thrust.  Neutralise that force before any
-// checkpoint pulse; the already-enabled bounded wheel retains attitude control.
-LOCAL BALLISTIC_GRID_FINS_NEUTRALIZED IS
+// Apply the configured post-entry coefficient independently of deployment.
+// Run 104 measured a large upward force even at zero deployment and therefore
+// requires the old zero-lift baseline before partial authority can be solved.
+LOCAL BALLISTIC_GRID_FINS_ENABLED IS
     SET_BOOSTER_GRID_FIN_LIFT_AUTHORITY(
         BOOSTER_TERMINAL_GRID_FIN_LIFT_AUTHORITY).
+LOCAL BALLISTIC_GRID_FINS_STOWED IS
+    SET_BOOSTER_GRID_FIN_DEPLOYMENT(0).
 LOG MISSION_ID + ",GRID_FIN_LIFT," + ROUND(TIME:SECONDS,3)
-    + ",count=" + BALLISTIC_GRID_FINS_NEUTRALIZED
+    + ",count=" + BALLISTIC_GRID_FINS_ENABLED
     + ",authority=" + BOOSTER_TERMINAL_GRID_FIN_LIFT_AUTHORITY
+    + ",stowed=" + BALLISTIC_GRID_FINS_STOWED
     TO "0:/cz10b/telemetry.csv".
 SET LAST_LOG TO TIME:SECONDS.
 UNTIL TERMINAL_IGNITION {
@@ -537,20 +539,21 @@ UNTIL TERMINAL_IGNITION {
     LOCAL PREDICTED_IGNITION_VERTICAL_V IS BALLISTIC_VERTICAL_V
         - EFFECTIVE_G * BALLISTIC_COAST_TGO.
     // The continuous main burn cannot coast after its 75% floor begins.  Give
-    // checkpoints 2/3 an explicit vertical-energy residual so they can slow
-    // descent without extending that irreversible downrange-braking segment.
+    // Every checkpoint owns the same measured horizontal-energy residual.
+    // Vertical shaping is disabled for the Step-106 horizontal cone-edge
+    // experiment so its impulse cannot silently replace the descent corridor.
     LOCAL MIDCOURSE_VERTICAL_SPEED_EXCESS IS MAX(
         -PREDICTED_IGNITION_VERTICAL_V
             - MIDCOURSE_VERTICAL_TARGET_IGNITION_SPEED, 0).
     LOCAL MIDCOURSE_VERTICAL_SHAPING_REQUESTED IS
-        MIDCOURSE_CHECKPOINT_INDEX >= 1
+        MIDCOURSE_CHECKPOINT_INDEX >= 0
         AND MIDCOURSE_VERTICAL_THRUST_G > 0
         AND MIDCOURSE_VERTICAL_SPEED_EXCESS
             > MIDCOURSE_VERTICAL_ERROR_DEADBAND.
     LOCAL MIDCOURSE_HORIZONTAL_SPEED_EXCESS IS MAX(
         BALLISTIC_H_VEL:MAG - MIDCOURSE_HORIZONTAL_TARGET_SPEED, 0).
     LOCAL MIDCOURSE_HORIZONTAL_SHAPING_REQUESTED IS
-        MIDCOURSE_CHECKPOINT_INDEX >= 1
+        MIDCOURSE_CHECKPOINT_INDEX >= 0
         AND MIDCOURSE_HORIZONTAL_TARGET_SPEED > 0
         AND MIDCOURSE_HORIZONTAL_SPEED_EXCESS
             > MIDCOURSE_HORIZONTAL_TARGET_DEADBAND.
@@ -738,7 +741,7 @@ UNTIL TERMINAL_IGNITION {
         // withdrew braking at 979 m/s.  Checkpoints 2/3 therefore own one
         // measured pulse-end state.  Latch the needed acceleration from the
         // pulse-start speed; release it at the target and never reverse it.
-        IF MIDCOURSE_CHECKPOINT_INDEX >= 1
+        IF MIDCOURSE_CHECKPOINT_INDEX >= 0
             AND MIDCOURSE_PULSE_START_H_VEL:MAG
                 > MIDCOURSE_HORIZONTAL_TARGET_SPEED
                     + MIDCOURSE_HORIZONTAL_TARGET_DEADBAND
@@ -907,14 +910,13 @@ UNTIL TERMINAL_IGNITION {
     LOCAL BALLISTIC_VERTICAL_READY IS BALLISTIC_HEIGHT
         <= BALLISTIC_IGNITION_HEIGHT
             + TERMINAL_MAIN_VERTICAL_READY_MARGIN.
-    LOCAL BALLISTIC_SHAPED_HANDOFF_READY IS BALLISTIC_VERTICAL_READY.
-    IF MIDCOURSE_VERTICAL_THRUST_G > 0 {
-        // The completed checkpoint phase deliberately reduces the vertical
-        // state used by BALLISTIC_IGNITION_HEIGHT.  Use a fixed, non-receding
-        // phase boundary so that benefit is not paid back as extra coast.
-        SET BALLISTIC_SHAPED_HANDOFF_READY TO BALLISTIC_HEIGHT
-            <= MIDCOURSE_SHAPED_MAIN_HANDOFF_HEIGHT.
-    }
+    // The Step-106 corridor owns both velocity axes from a declared height,
+    // including when its three checkpoints are horizontal-only.  Run 102 left
+    // this fixed handoff conditional on nonzero checkpoint vertical thrust;
+    // with that thrust deliberately disabled, the old vertical solver delayed
+    // gate commit from 23.6 to 16.0 km and made the corridor unreachable.
+    LOCAL BALLISTIC_SHAPED_HANDOFF_READY IS BALLISTIC_HEIGHT
+        <= MIDCOURSE_SHAPED_MAIN_HANDOFF_HEIGHT.
     LOCAL BALLISTIC_ENERGY_IGNITION IS BALLISTIC_VERTICAL_IGNITION
         OR BALLISTIC_HORIZONTAL_IGNITION.
     // The load cone makes the powered path one-way in downrange velocity.  A
@@ -995,6 +997,89 @@ UNTIL TERMINAL_IGNITION {
     SET BALLISTIC_PREVIOUS_V TO SHIP:VELOCITY:SURFACE.
     SET BALLISTIC_WAS_POWERED TO MIDCOURSE_ACTIVE.
     WAIT 0.02.
+}
+
+// Step-106 joint corridor.  References are deliberately height indexed so the
+// trajectory cannot extend its own deadline.  Their slopes convert the same
+// path into physically dimensioned feed-forward acceleration.
+FUNCTION HYBRID_CORRIDOR_LINEAR {
+    PARAMETER HEIGHT_VALUE, HEIGHT_HIGH, VALUE_HIGH,
+              HEIGHT_LOW, VALUE_LOW.
+    LOCAL BLEND IS CLAMP((HEIGHT_HIGH - HEIGHT_VALUE)
+        / MAX(HEIGHT_HIGH - HEIGHT_LOW, 1), 0, 1).
+    RETURN VALUE_HIGH + (VALUE_LOW - VALUE_HIGH) * BLEND.
+}
+
+FUNCTION HYBRID_CORRIDOR_HORIZONTAL_REFERENCE {
+    PARAMETER HEIGHT_VALUE.
+    IF HEIGHT_VALUE >= 23572 { RETURN 821.3. }
+    IF HEIGHT_VALUE >= 20572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 23572, 821.3, 20572, 753.5). }
+    IF HEIGHT_VALUE >= 18572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 20572, 753.5, 18572, 691.5). }
+    IF HEIGHT_VALUE >= 16572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 18572, 691.5, 16572, 614.5). }
+    IF HEIGHT_VALUE >= 14572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 16572, 614.5, 14572, 530.0). }
+    IF HEIGHT_VALUE >= 12572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 14572, 530.0, 12572, 425.0). }
+    IF HEIGHT_VALUE >= 10572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 12572, 425.0, 10572, 315.0). }
+    IF HEIGHT_VALUE >= 8572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 10572, 315.0, 8572, 230.0). }
+    IF HEIGHT_VALUE >= 6572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 8572, 230.0, 6572, 160.0). }
+    RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 6572, 160.0, 6000, 131.0).
+}
+
+FUNCTION HYBRID_CORRIDOR_DOWN_REFERENCE {
+    PARAMETER HEIGHT_VALUE.
+    IF HEIGHT_VALUE >= 23572 { RETURN 635.3. }
+    IF HEIGHT_VALUE >= 20572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 23572, 635.3, 20572, 625.5). }
+    IF HEIGHT_VALUE >= 18572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 20572, 625.5, 18572, 608.0). }
+    IF HEIGHT_VALUE >= 16572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 18572, 608.0, 16572, 590.5). }
+    IF HEIGHT_VALUE >= 14572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 16572, 590.5, 14572, 559.5). }
+    IF HEIGHT_VALUE >= 12572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 14572, 559.5, 12572, 519.0). }
+    IF HEIGHT_VALUE >= 10572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 12572, 519.0, 10572, 465.0). }
+    IF HEIGHT_VALUE >= 8572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 10572, 465.0, 8572, 435.0). }
+    IF HEIGHT_VALUE >= 6572 { RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 8572, 435.0, 6572, 400.0). }
+    RETURN HYBRID_CORRIDOR_LINEAR(
+        HEIGHT_VALUE, 6572, 400.0, 6000, 381.0).
+}
+
+FUNCTION HYBRID_CORRIDOR_HORIZONTAL_SLOPE {
+    PARAMETER HEIGHT_VALUE.
+    IF HEIGHT_VALUE >= 20572 { RETURN (821.3 - 753.5) / 3000. }
+    IF HEIGHT_VALUE >= 18572 { RETURN (753.5 - 691.5) / 2000. }
+    IF HEIGHT_VALUE >= 16572 { RETURN (691.5 - 614.5) / 2000. }
+    IF HEIGHT_VALUE >= 14572 { RETURN (614.5 - 530.0) / 2000. }
+    IF HEIGHT_VALUE >= 12572 { RETURN (530.0 - 425.0) / 2000. }
+    IF HEIGHT_VALUE >= 10572 { RETURN (425.0 - 315.0) / 2000. }
+    IF HEIGHT_VALUE >= 8572 { RETURN (315.0 - 230.0) / 2000. }
+    IF HEIGHT_VALUE >= 6572 { RETURN (230.0 - 160.0) / 2000. }
+    RETURN (160.0 - 131.0) / 572.
+}
+
+FUNCTION HYBRID_CORRIDOR_DOWN_SLOPE {
+    PARAMETER HEIGHT_VALUE.
+    IF HEIGHT_VALUE >= 20572 { RETURN (635.3 - 625.5) / 3000. }
+    IF HEIGHT_VALUE >= 18572 { RETURN (625.5 - 608.0) / 2000. }
+    IF HEIGHT_VALUE >= 16572 { RETURN (608.0 - 590.5) / 2000. }
+    IF HEIGHT_VALUE >= 14572 { RETURN (590.5 - 559.5) / 2000. }
+    IF HEIGHT_VALUE >= 12572 { RETURN (559.5 - 519.0) / 2000. }
+    IF HEIGHT_VALUE >= 10572 { RETURN (519.0 - 465.0) / 2000. }
+    IF HEIGHT_VALUE >= 8572 { RETURN (465.0 - 435.0) / 2000. }
+    IF HEIGHT_VALUE >= 6572 { RETURN (435.0 - 400.0) / 2000. }
+    RETURN (400.0 - 381.0) / 572.
 }
 
 // Prefer to light after reaching the planned cone-edge axis.  A bounded fallback
@@ -1140,9 +1225,23 @@ LOCAL HORIZONTAL_SETTLE_MODE IS FALSE.
 LOCAL WIRE_HOLD_STARTED_AT IS -1.
 LOCAL FINAL_ALIGN_MODE IS FALSE.
 LOCAL FINAL_ALIGN_STARTED_AT IS -1.
+LOCAL FINAL_ALIGN_ENTRY_RATIO IS -1.
+LOCAL FINAL_ALIGN_ACTIVE_POSITION_GAIN IS FINAL_ALIGN_POSITION_GAIN.
+LOCAL TERMINAL_EARLY_AERO_BRAKE_LATCHED IS FALSE.
+LOCAL TERMINAL_EARLY_AERO_BRAKE_ENTRY_RATIO IS -1.
+LOCAL TERMINAL_EARLY_AERO_BRAKE_FLOOR IS 0.
+LOCAL FINAL_ALIGN_TERMINAL_PHASE_LATCHED IS FALSE.
+LOCAL FINAL_ALIGN_TERMINAL_ENTRY_RATIO IS -1.
+LOCAL FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_SCALE IS 1.
+LOCAL FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_END_HEIGHT IS
+    TERMINAL_ALONG_AERO_BRAKE_FULL_HOLD_END_HEIGHT.
 LOCAL FINAL_DESCENT_ARMED IS FALSE.
 LOCAL TERMINAL_STEERING_TUNED IS FALSE.
 LOCAL FILTERED_H_ACCEL IS V(0,0,0).
+LOCAL LIVE_APPROACH_OFFSET_FINAL_BLEND_STATE IS
+    TERMINAL_LIVE_APPROACH_OFFSET_FINAL_BLEND.
+LOCAL LIVE_APPROACH_OFFSET_RANGE_LATCHED IS FALSE.
+LOCAL LIVE_APPROACH_OFFSET_RANGE_AT_LATCH IS -1.
 // Persistent one-way latch for the reachable fixed-axis stopping boundary.
 // A per-frame feasibility switch can chatter as drag and the velocity cone
 // move; once a genuinely reachable stop is committed, retain it until the
@@ -1167,6 +1266,7 @@ LOCAL CROSS_AERO_BRAKE_RELEASE_STARTED IS FALSE.
 // legal cone-edge attitude has a multi-second aerodynamic response, so a raw
 // per-frame pressure switch would merely turn force lag into direction PWM.
 LOCAL ALONG_AERO_BRAKE_BLEND_STATE IS 0.
+LOCAL ALONG_AERO_BRAKE_LOW_SPEED_SETTLE_ACTIVE IS FALSE.
 LOCAL POWERED_PREVIOUS_V IS SHIP:VELOCITY:SURFACE.
 // Carry the already identified coast aerodynamics across ignition. Starting
 // these filters at zero made the first seconds of run 20 command excessive
@@ -1176,6 +1276,11 @@ LOCAL POWERED_FILTERED_VERTICAL_AERO_ACCEL IS FILTERED_VERTICAL_DRAG.
 LOCAL POWERED_FILTERED_HORIZONTAL_AERO_ACCEL IS FILTERED_HORIZONTAL_DRAG.
 LOCAL TERMINAL_WHEEL_AUTHORITY_COMMAND IS
     BOOSTER_TERMINAL_REACTION_WHEEL_AUTHORITY.
+LOCAL GRID_FIN_DEPLOYMENT_COMMAND IS 0.
+LOCAL GRID_FIN_LAST_SENT_COMMAND IS -1.
+LOCAL GRID_FIN_APPLIED_DEGREES IS BOOSTER_GRID_FIN_APPLIED_DEPLOYMENT().
+LOCAL GRID_FIN_INITIALIZED_COUNT IS
+    SET_BOOSTER_GRID_FIN_DEPLOYMENT(0).
 SET LAST_LOG TO TIME:SECONDS.
 
 UNTIL HOOK_CAPTURED() {
@@ -1187,10 +1292,29 @@ UNTIL HOOK_CAPTURED() {
     LOCAL DT IS CLAMP(POWERED_MEASUREMENT_DT, 0.001, 0.1).
     SET PREVIOUS_TIME TO NOW.
 
+    // Keep the checkpoint and upper main-burn actuator unchanged, then shed
+    // only the excess low-altitude vertical authority identified in Run 107.
+    // The height-indexed schedule is continuous and does not modulate throttle.
+    LOCAL RETURN_ENGINE_LOW_ALT_BLEND IS CLAMP(
+        (RETURN_ENGINE_LOW_ALT_RAMP_START_HEIGHT - SHIP:ALTITUDE)
+        / MAX(RETURN_ENGINE_LOW_ALT_RAMP_START_HEIGHT
+            - RETURN_ENGINE_LOW_ALT_RAMP_FULL_HEIGHT, 1), 0, 1).
+    LOCAL RETURN_ENGINE_CURRENT_MAX_ACCEL IS RETURN_ENGINE_MAX_ACCEL
+        + (RETURN_ENGINE_LOW_ALT_MAX_ACCEL - RETURN_ENGINE_MAX_ACCEL)
+        * RETURN_ENGINE_LOW_ALT_BLEND.
+    LOCAL RETURN_ENGINE_POST_WAYPOINT_BLEND IS CLAMP(
+        (TERMINAL_WAYPOINT_HEIGHT - SHIP:ALTITUDE)
+        / MAX(TERMINAL_WAYPOINT_HEIGHT
+            - RETURN_ENGINE_POST_WAYPOINT_RAMP_FULL_HEIGHT, 1), 0, 1).
+    SET RETURN_ENGINE_CURRENT_MAX_ACCEL TO
+        RETURN_ENGINE_CURRENT_MAX_ACCEL
+        + (RETURN_ENGINE_POST_WAYPOINT_MAX_ACCEL
+            - RETURN_ENGINE_CURRENT_MAX_ACCEL)
+            * RETURN_ENGINE_POST_WAYPOINT_BLEND.
     IF NOW - RETURN_ACCEL_LAST_UPDATE
             >= RETURN_ENGINE_ACCEL_UPDATE_SECONDS {
         SET RETURN_ACCEL_NORMALIZED TO NORMALIZE_BOOSTER_ENGINE_ACCEL(
-            BOOSTER_ENGINE_PART_NAME, RETURN_ENGINE_MAX_ACCEL,
+            BOOSTER_ENGINE_PART_NAME, RETURN_ENGINE_CURRENT_MAX_ACCEL,
             RETURN_ENGINE_MIN_THRUST_LIMIT, RETURN_ENGINE_THRUST_LIMIT).
         SET RETURN_ACCEL_LAST_UPDATE TO NOW.
     }
@@ -1200,20 +1324,47 @@ UNTIL HOOK_CAPTURED() {
     LOCAL HEIGHT IS -VDOT(REL_POS, UP_VEC).
     LOCAL HOOK_HEIGHT IS HEIGHT + BOOSTER_HOOK_OFFSET_ALONG_UP(UP_VEC).
     LOCAL HORIZONTAL_POS IS VXCL(UP_VEC, REL_POS).
-    LOCAL CONTROL_APPROACH_OFFSET IS VXCL(UP_VEC, PLAN_APPROACH_OFFSET).
-    LOCAL WAYPOINT_CONTROL_H_POS IS HORIZONTAL_POS
-        - CONTROL_APPROACH_OFFSET.
-    // PLAN_ALONG_DIRECTION was frozen in the ignition tangent plane. Kerbin's
-    // local up rotates appreciably over the remaining downrange distance, so
-    // using that world vector directly creates a false vertical/cross-track
-    // component. Parallel-transport the heading by projecting it into the live
-    // tangent plane before every along/cross decomposition.
+    // Parallel-transport the frozen ignition heading into the live tangent
+    // plane before using the 4 km signed-range calibration below.
     LOCAL CONTROL_ALONG_DIRECTION IS VXCL(UP_VEC, PLAN_ALONG_DIRECTION).
     IF CONTROL_ALONG_DIRECTION:MAG > 0.0001 {
         SET CONTROL_ALONG_DIRECTION TO CONTROL_ALONG_DIRECTION:NORMALIZED.
     } ELSE {
         SET CONTROL_ALONG_DIRECTION TO PLAN_ALONG_DIRECTION.
     }
+    IF NOT LIVE_APPROACH_OFFSET_RANGE_LATCHED
+        AND HOOK_HEIGHT
+            <= TERMINAL_LIVE_APPROACH_OFFSET_FADE_START_HEIGHT {
+        SET LIVE_APPROACH_OFFSET_RANGE_AT_LATCH TO VDOT(
+            HORIZONTAL_POS, CONTROL_ALONG_DIRECTION).
+        SET LIVE_APPROACH_OFFSET_FINAL_BLEND_STATE TO CLAMP(
+            TERMINAL_LIVE_APPROACH_OFFSET_FINAL_BLEND
+            + (TERMINAL_LIVE_APPROACH_OFFSET_FADE_REFERENCE_RANGE
+                - LIVE_APPROACH_OFFSET_RANGE_AT_LATCH)
+                * TERMINAL_LIVE_APPROACH_OFFSET_FADE_RANGE_GAIN
+                / MAX(PLAN_APPROACH_DISTANCE, 1),
+            TERMINAL_LIVE_APPROACH_OFFSET_FINAL_MIN_BLEND,
+            TERMINAL_LIVE_APPROACH_OFFSET_FINAL_MAX_BLEND).
+        SET LIVE_APPROACH_OFFSET_RANGE_LATCHED TO TRUE.
+    }
+    LOCAL LIVE_APPROACH_OFFSET_BASE_BLEND IS CLAMP(
+        (HOOK_HEIGHT - TERMINAL_LIVE_APPROACH_OFFSET_FADE_END_HEIGHT)
+        / MAX(TERMINAL_LIVE_APPROACH_OFFSET_FADE_START_HEIGHT
+            - TERMINAL_LIVE_APPROACH_OFFSET_FADE_END_HEIGHT, 1), 0, 1).
+    LOCAL LIVE_APPROACH_OFFSET_POST_BLEND IS CLAMP(
+        (HOOK_HEIGHT
+            - TERMINAL_LIVE_APPROACH_OFFSET_POST_FADE_END_HEIGHT)
+        / MAX(TERMINAL_WAYPOINT_HEIGHT
+            - TERMINAL_LIVE_APPROACH_OFFSET_POST_FADE_END_HEIGHT, 1), 0, 1).
+    LOCAL LIVE_APPROACH_OFFSET_BLEND IS
+        LIVE_APPROACH_OFFSET_BASE_BLEND
+        + (1 - LIVE_APPROACH_OFFSET_BASE_BLEND)
+            * LIVE_APPROACH_OFFSET_FINAL_BLEND_STATE
+            * LIVE_APPROACH_OFFSET_POST_BLEND.
+    LOCAL CONTROL_APPROACH_OFFSET IS VXCL(UP_VEC, PLAN_APPROACH_OFFSET)
+        * LIVE_APPROACH_OFFSET_BLEND.
+    LOCAL WAYPOINT_CONTROL_H_POS IS HORIZONTAL_POS
+        - CONTROL_APPROACH_OFFSET.
     LOCAL TERMINAL_CONTROL_H_POS IS HORIZONTAL_POS.
     IF HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
         SET TERMINAL_CONTROL_H_POS TO WAYPOINT_CONTROL_H_POS.
@@ -1223,6 +1374,67 @@ UNTIL HOOK_CAPTURED() {
     LOCAL HORIZONTAL_VEL IS VXCL(UP_VEC, REL_VEL).
     LOCAL G_ACC IS SHIP:BODY:MU / ((SHIP:BODY:RADIUS + SHIP:ALTITUDE)^2).
     LOCAL AVAILABLE_ACC IS SHIP:AVAILABLETHRUST / MAX(SHIP:MASS, 0.001).
+
+    LOCAL HYBRID_CORRIDOR_ACTIVE IS HOOK_HEIGHT
+        > HYBRID_CORRIDOR_END_HEIGHT.
+    LOCAL HYBRID_HORIZONTAL_REFERENCE IS
+        HYBRID_CORRIDOR_HORIZONTAL_REFERENCE(HOOK_HEIGHT).
+    LOCAL HYBRID_DOWN_REFERENCE IS
+        HYBRID_CORRIDOR_DOWN_REFERENCE(HOOK_HEIGHT).
+    LOCAL HYBRID_HORIZONTAL_RESIDUAL IS HORIZONTAL_VEL:MAG
+        - HYBRID_HORIZONTAL_REFERENCE.
+    LOCAL HYBRID_DOWN_RESIDUAL IS -VERTICAL_V
+        - HYBRID_DOWN_REFERENCE.
+    LOCAL GRID_FIN_OPEN_BLEND IS CLAMP(
+        (GRID_FIN_AERO_OPEN_START_HEIGHT - HOOK_HEIGHT)
+        / MAX(GRID_FIN_AERO_OPEN_START_HEIGHT
+            - GRID_FIN_AERO_FULL_HEIGHT, 1), 0, 1).
+    LOCAL GRID_FIN_STOW_BLEND IS CLAMP(
+        (HOOK_HEIGHT - GRID_FIN_AERO_STOW_END_HEIGHT)
+        / MAX(GRID_FIN_AERO_STOW_START_HEIGHT
+            - GRID_FIN_AERO_STOW_END_HEIGHT, 1), 0, 1).
+    LOCAL GRID_FIN_NOMINAL_COMMAND IS 100
+        * MIN(GRID_FIN_OPEN_BLEND, GRID_FIN_STOW_BLEND).
+    LOCAL GRID_FIN_HORIZONTAL_CORRECTION IS CLAMP(
+        HYBRID_HORIZONTAL_RESIDUAL
+            * GRID_FIN_AERO_HORIZONTAL_ERROR_GAIN,
+        -GRID_FIN_AERO_HORIZONTAL_ERROR_LIMIT_PERCENT,
+        GRID_FIN_AERO_HORIZONTAL_ERROR_LIMIT_PERCENT).
+    LOCAL GRID_FIN_DOWN_CORRECTION IS 0.
+    IF HOOK_HEIGHT > 11000 {
+        SET GRID_FIN_DOWN_CORRECTION TO CLAMP(
+            -HYBRID_DOWN_RESIDUAL * GRID_FIN_AERO_DOWN_ERROR_GAIN,
+            -GRID_FIN_AERO_DOWN_ERROR_LIMIT_PERCENT,
+            GRID_FIN_AERO_DOWN_ERROR_LIMIT_PERCENT).
+    }
+    LOCAL GRID_FIN_DESIRED_COMMAND IS CLAMP(
+        GRID_FIN_NOMINAL_COMMAND + GRID_FIN_HORIZONTAL_CORRECTION
+            + GRID_FIN_DOWN_CORRECTION, 0,
+        GRID_FIN_AERO_MAX_DEPLOYMENT_PERCENT).
+    IF NOT HYBRID_CORRIDOR_ACTIVE
+        OR HOOK_HEIGHT <= GRID_FIN_AERO_STOW_END_HEIGHT {
+        SET GRID_FIN_DESIRED_COMMAND TO 0.
+    }
+    LOCAL GRID_FIN_COMMAND_STEP IS
+        GRID_FIN_AERO_COMMAND_RATE_PERCENT_PER_SECOND
+            * POWERED_MEASUREMENT_DT.
+    IF GRID_FIN_DEPLOYMENT_COMMAND < GRID_FIN_DESIRED_COMMAND {
+        SET GRID_FIN_DEPLOYMENT_COMMAND TO MIN(
+            GRID_FIN_DEPLOYMENT_COMMAND + GRID_FIN_COMMAND_STEP,
+            GRID_FIN_DESIRED_COMMAND).
+    } ELSE {
+        SET GRID_FIN_DEPLOYMENT_COMMAND TO MAX(
+            GRID_FIN_DEPLOYMENT_COMMAND - GRID_FIN_COMMAND_STEP,
+            GRID_FIN_DESIRED_COMMAND).
+    }
+    IF ABS(GRID_FIN_DEPLOYMENT_COMMAND
+            - GRID_FIN_LAST_SENT_COMMAND) >= 0.25 {
+        LOCAL GRID_FIN_DEPLOYMENT_COUNT IS
+            SET_BOOSTER_GRID_FIN_DEPLOYMENT(
+                GRID_FIN_DEPLOYMENT_COMMAND).
+        SET GRID_FIN_LAST_SENT_COMMAND TO
+            GRID_FIN_DEPLOYMENT_COMMAND.
+    }
 
     // Use extra attitude authority only while dynamic pressure is high enough
     // to require it. Restore the proven 10% setting before the low-altitude
@@ -1421,13 +1633,97 @@ UNTIL HOOK_CAPTURED() {
     }
     // Enter this state only once.  Holding the latch prevents a small position
     // excursion from switching the outer controller back on during settling.
+    // The maximum-drag state becomes common near 12 km, after which an early
+    // range deficit cannot be recovered. Latch the still-available 14 km
+    // physical closing ratio and preload the existing ownership ramp only.
+    IF NOT TERMINAL_EARLY_AERO_BRAKE_LATCHED
+        AND HOOK_HEIGHT <= TERMINAL_EARLY_AERO_BRAKE_LATCH_HEIGHT
+        AND HOOK_HEIGHT > TERMINAL_EARLY_AERO_BRAKE_HOLD_END_HEIGHT {
+        LOCAL TERMINAL_EARLY_AERO_BRAKE_INWARD_SPEED IS 0.
+        IF HORIZONTAL_POS:MAG > 0.25 {
+            SET TERMINAL_EARLY_AERO_BRAKE_INWARD_SPEED TO MAX(0, VDOT(
+                HORIZONTAL_VEL, HORIZONTAL_POS:NORMALIZED)).
+        }
+        SET TERMINAL_EARLY_AERO_BRAKE_ENTRY_RATIO TO
+            TERMINAL_EARLY_AERO_BRAKE_INWARD_SPEED
+            / MAX(HORIZONTAL_POS:MAG, 1).
+        SET TERMINAL_EARLY_AERO_BRAKE_FLOOR TO CLAMP(
+            TERMINAL_EARLY_AERO_BRAKE_MIN_FLOOR
+                + (TERMINAL_EARLY_AERO_BRAKE_ENTRY_RATIO
+                    - TERMINAL_EARLY_AERO_BRAKE_LOW_RATIO)
+                / MAX(
+                    TERMINAL_EARLY_AERO_BRAKE_FULL_RATIO
+                        - TERMINAL_EARLY_AERO_BRAKE_LOW_RATIO,
+                    0.00001)
+                * (1 - TERMINAL_EARLY_AERO_BRAKE_MIN_FLOOR),
+            TERMINAL_EARLY_AERO_BRAKE_MIN_FLOOR,
+            1).
+        SET TERMINAL_EARLY_AERO_BRAKE_LATCHED TO TRUE.
+    }
     IF NOT FINAL_ALIGN_MODE
         AND HOOK_HEIGHT <= FINAL_ALIGN_HEIGHT
         AND HORIZONTAL_POS:MAG <= FINAL_ALIGN_RANGE {
+        LOCAL FINAL_ALIGN_ENTRY_INWARD_SPEED IS 0.
+        IF HORIZONTAL_POS:MAG > 0.25 {
+            SET FINAL_ALIGN_ENTRY_INWARD_SPEED TO MAX(0, VDOT(
+                HORIZONTAL_VEL, HORIZONTAL_POS:NORMALIZED)).
+        }
+        SET FINAL_ALIGN_ENTRY_RATIO TO
+            FINAL_ALIGN_ENTRY_INWARD_SPEED
+            / MAX(HORIZONTAL_POS:MAG, 1).
+        SET FINAL_ALIGN_ACTIVE_POSITION_GAIN TO CLAMP(
+            FINAL_ALIGN_ENTRY_COMPLEMENT_GAIN
+                - FINAL_ALIGN_ENTRY_RATIO,
+            FINAL_ALIGN_MIN_POSITION_GAIN,
+            FINAL_ALIGN_MAX_POSITION_GAIN).
         SET FINAL_ALIGN_MODE TO TRUE.
         SET FINAL_ALIGN_STARTED_AT TO NOW.
         SET VERTICAL_INTEGRAL TO 0.
         PRINT "FINAL ALIGN HOLD" AT(0,11).
+    }
+    // The 6--5 km phase only removes entrance dispersion before the dense-air
+    // actuator saturates. Select the final phase line once at 5 km from that
+    // transformed physical state, then retain it through the formal plane.
+    IF FINAL_ALIGN_MODE
+        AND NOT FINAL_ALIGN_TERMINAL_PHASE_LATCHED
+        AND NOT FINAL_DESCENT_ARMED
+        AND HOOK_HEIGHT <= FINAL_ALIGN_TERMINAL_PHASE_HEIGHT {
+        LOCAL FINAL_ALIGN_TERMINAL_INWARD_SPEED IS 0.
+        IF HORIZONTAL_POS:MAG > 0.25 {
+            SET FINAL_ALIGN_TERMINAL_INWARD_SPEED TO MAX(0, VDOT(
+                HORIZONTAL_VEL, HORIZONTAL_POS:NORMALIZED)).
+        }
+        SET FINAL_ALIGN_TERMINAL_ENTRY_RATIO TO
+            FINAL_ALIGN_TERMINAL_INWARD_SPEED
+            / MAX(HORIZONTAL_POS:MAG, 1).
+        SET FINAL_ALIGN_ACTIVE_POSITION_GAIN TO CLAMP(
+            FINAL_ALIGN_TERMINAL_ENTRY_RATIO,
+            FINAL_ALIGN_TERMINAL_MIN_POSITION_GAIN,
+            FINAL_ALIGN_TERMINAL_MAX_POSITION_GAIN).
+        SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_SCALE TO CLAMP(
+            FINAL_ALIGN_TERMINAL_AERO_BRAKE_MIN_HOLD_SCALE
+                + (FINAL_ALIGN_TERMINAL_ENTRY_RATIO
+                    - FINAL_ALIGN_TERMINAL_AERO_BRAKE_LOW_RATIO)
+                / MAX(
+                    FINAL_ALIGN_TERMINAL_AERO_BRAKE_FULL_RATIO
+                        - FINAL_ALIGN_TERMINAL_AERO_BRAKE_LOW_RATIO,
+                    0.001)
+                * (1 - FINAL_ALIGN_TERMINAL_AERO_BRAKE_MIN_HOLD_SCALE),
+            FINAL_ALIGN_TERMINAL_AERO_BRAKE_MIN_HOLD_SCALE,
+            1).
+        SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_END_HEIGHT TO
+            TERMINAL_ALONG_AERO_BRAKE_FULL_HOLD_END_HEIGHT
+            + (FINAL_ALIGN_TERMINAL_AERO_BRAKE_MIN_END_HEIGHT
+                - TERMINAL_ALONG_AERO_BRAKE_FULL_HOLD_END_HEIGHT)
+                * CLAMP(
+                    (FINAL_ALIGN_TERMINAL_ENTRY_RATIO
+                        - FINAL_ALIGN_TERMINAL_AERO_BRAKE_END_LOW_RATIO)
+                    / MAX(
+                        FINAL_ALIGN_TERMINAL_AERO_BRAKE_END_FULL_RATIO
+                            - FINAL_ALIGN_TERMINAL_AERO_BRAKE_END_LOW_RATIO,
+                        0.001),
+                    0, 1).
+        SET FINAL_ALIGN_TERMINAL_PHASE_LATCHED TO TRUE.
     }
     IF PID_MODE AND NOT WAS_PID_MODE {
         SET VERTICAL_INTEGRAL TO 0.
@@ -1867,13 +2163,26 @@ UNTIL HOOK_CAPTURED() {
                 TERMINAL_ALIGN_REACQUIRE_MAX_ACCEL).
         }
     }
+    LOCAL FINAL_ALIGN_TERMINAL_FINITE_TIME_ACTIVE IS FALSE.
+    LOCAL FINAL_ALIGN_TERMINAL_TGO IS 0.
+    LOCAL FINAL_ALIGN_TERMINAL_CONTROL_TGO IS 0.
+    LOCAL FINAL_ALIGN_TERMINAL_CONTROL_POS IS V(0,0,0).
+    LOCAL FINAL_ALIGN_FINITE_TIME_START_BLEND IS CLAMP(
+        (FINAL_ALIGN_ENTRY_RATIO
+            - FINAL_ALIGN_FINITE_TIME_START_LOW_RATIO)
+        / MAX(FINAL_ALIGN_FINITE_TIME_START_FULL_RATIO
+            - FINAL_ALIGN_FINITE_TIME_START_LOW_RATIO, 0.0001), 0, 1).
+    LOCAL FINAL_ALIGN_FINITE_TIME_START_HEIGHT IS
+        FINAL_ALIGN_TERMINAL_PHASE_HEIGHT
+        + (FINAL_ALIGN_HEIGHT - FINAL_ALIGN_TERMINAL_PHASE_HEIGHT)
+            * FINAL_ALIGN_FINITE_TIME_START_BLEND.
     IF FINAL_ALIGN_MODE AND NOT FINAL_DESCENT_ARMED {
         // The long stage has about a 1.5 s attitude response.  A deliberately
         // slower velocity loop settles that lag while the stage is held above
         // the frame, rather than commanding another full-speed centre pass.
         LOCAL FINAL_STOP_RANGE IS HORIZONTAL_POS:MAG.
         LOCAL FINAL_H_SPEED IS MIN(FINAL_ALIGN_SPEED,
-            FINAL_STOP_RANGE * FINAL_ALIGN_POSITION_GAIN).
+            FINAL_STOP_RANGE * FINAL_ALIGN_ACTIVE_POSITION_GAIN).
         LOCAL FINAL_DESIRED_H_VEL IS V(0,0,0).
         IF HORIZONTAL_POS:MAG > 0.25 {
             SET FINAL_DESIRED_H_VEL TO HORIZONTAL_POS:NORMALIZED
@@ -1882,6 +2191,35 @@ UNTIL HOOK_CAPTURED() {
         SET H_ACCEL TO CLAMPV((FINAL_DESIRED_H_VEL - HORIZONTAL_VEL)
             * FINAL_ALIGN_VELOCITY_GAIN,
             TERMINAL_MAX_HORIZONTAL_ACCEL).
+        IF HOOK_HEIGHT <= FINAL_ALIGN_FINITE_TIME_START_HEIGHT
+            AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
+            // Once the physical target owns the existing 6 km final-align
+            // mode, solve its position and velocity as one finite-time
+            // boundary condition. Run 173 showed that retaining the static
+            // phase until 5 km preserved a 33 m entrance-range dispersion
+            // that the short terminal actuator horizon could not recover.
+            // T follows the already controlled vertical 2 km endpoint, so the
+            // stage brakes early enough to preserve stopping distance instead
+            // of waiting for the static position-gain line to collapse.  At
+            // and below 2 km the bounded settling law above resumes.
+            SET FINAL_ALIGN_TERMINAL_TGO TO 2
+                * (HOOK_HEIGHT - TERMINAL_WAYPOINT_HEIGHT)
+                / MAX(-VERTICAL_V + TERMINAL_WAYPOINT_VERTICAL_SPEED, 1).
+            SET FINAL_ALIGN_TERMINAL_CONTROL_TGO TO MAX(
+                FINAL_ALIGN_TERMINAL_TGO
+                    - FINAL_ALIGN_TERMINAL_RESPONSE_LEAD_SECONDS, 0.5).
+            SET FINAL_ALIGN_TERMINAL_CONTROL_POS TO HORIZONTAL_POS
+                - HORIZONTAL_VEL
+                    * FINAL_ALIGN_TERMINAL_RESPONSE_LEAD_SECONDS.
+            SET H_ACCEL TO FINAL_ALIGN_TERMINAL_CONTROL_POS
+                    * (6 / MAX(
+                        FINAL_ALIGN_TERMINAL_CONTROL_TGO^2, 0.25))
+                - HORIZONTAL_VEL
+                    * (4 / FINAL_ALIGN_TERMINAL_CONTROL_TGO).
+            SET H_ACCEL TO CLAMPV(H_ACCEL,
+                TERMINAL_MAX_HORIZONTAL_ACCEL).
+            SET FINAL_ALIGN_TERMINAL_FINITE_TIME_ACTIVE TO TRUE.
+        }
     }
 
     LOCAL STAGE_TILT IS VANG(SHIP:FACING:FOREVECTOR, UP_VEC).
@@ -1960,11 +2298,10 @@ UNTIL HOOK_CAPTURED() {
             + V_VEL_KI * VERTICAL_INTEGRAL.
     }
     IF FINAL_DESCENT_ARMED {
-        // Vertical capture is a one-way mode, but it still owns a deliberately
-        // slow centring field. Pure velocity damping allowed a 6-7 m committed
-        // alignment to drift beyond the cable cradle's short-axis travel during
-        // the final low-fuel crossing. The 0.75 m/s cap cannot recreate the old
-        // centre-chasing pass or demand a large low-altitude tilt.
+        // Vertical capture is a one-way mode. The position-field structure is
+        // retained for explicit A/B tests, but the flight speed cap is zero:
+        // Run 141's 0.75 m/s pursuit produced a delayed 50 m pass. Run 177's
+        // residual drift is handled by stronger bounded velocity damping.
         LOCAL FINAL_CAPTURE_DESIRED_H_VEL IS V(0,0,0).
         LOCAL FINAL_CAPTURE_POSITION_RANGE IS HORIZONTAL_POS:MAG.
         IF FINAL_CAPTURE_POSITION_RANGE > FINAL_CAPTURE_POSITION_DEADBAND {
@@ -2115,6 +2452,39 @@ UNTIL HOOK_CAPTURED() {
             }
         }
     }
+    // Above 6 km the corrected hybrid tube owns the two longitudinal state
+    // coordinates independently of ship placement.  Position/cross-track
+    // guidance remains intact, while height derivatives provide the nominal
+    // net accelerations and bounded residual feedback absorbs force error.
+    IF HYBRID_CORRIDOR_ACTIVE
+        AND CONTROL_ALONG_DIRECTION:MAG > 0.001 {
+        LOCAL HYBRID_CURRENT_ALONG_ACCEL IS VDOT(
+            H_ACCEL, CONTROL_ALONG_DIRECTION).
+        LOCAL HYBRID_CROSS_ACCEL IS H_ACCEL
+            - CONTROL_ALONG_DIRECTION * HYBRID_CURRENT_ALONG_ACCEL.
+        LOCAL HYBRID_HORIZONTAL_FEEDBACK IS CLAMP(
+            -HYBRID_HORIZONTAL_RESIDUAL
+                * HYBRID_CORRIDOR_HORIZONTAL_GAIN,
+            -HYBRID_CORRIDOR_MAX_FEEDBACK_ACCEL,
+            HYBRID_CORRIDOR_MAX_FEEDBACK_ACCEL).
+        LOCAL HYBRID_TARGET_ALONG_ACCEL IS
+            HYBRID_CORRIDOR_HORIZONTAL_SLOPE(HOOK_HEIGHT)
+                * VERTICAL_V
+            + HYBRID_HORIZONTAL_FEEDBACK.
+        SET H_ACCEL TO HYBRID_CROSS_ACCEL
+            + CONTROL_ALONG_DIRECTION * HYBRID_TARGET_ALONG_ACCEL.
+
+        LOCAL HYBRID_DOWN_FEEDBACK IS CLAMP(
+            HYBRID_DOWN_RESIDUAL * HYBRID_CORRIDOR_DOWN_GAIN,
+            -HYBRID_CORRIDOR_MAX_FEEDBACK_ACCEL,
+            HYBRID_CORRIDOR_MAX_FEEDBACK_ACCEL).
+        LOCAL HYBRID_TARGET_VERTICAL_NET_ACCEL IS
+            -HYBRID_CORRIDOR_DOWN_SLOPE(HOOK_HEIGHT) * VERTICAL_V
+            + HYBRID_DOWN_FEEDBACK.
+        SET VERTICAL_THRUST_CMD TO G_ACC
+            + HYBRID_TARGET_VERTICAL_NET_ACCEL.
+    }
+
     // All guidance laws above specify desired *net* acceleration.  Convert it
     // to an engine request by cancelling the identified aerodynamic force.
     // This is the powered half of the documented hybrid model: the ballistic
@@ -2126,6 +2496,15 @@ UNTIL HOOK_CAPTURED() {
     LOCAL CURRENT_ACCEL_FILTER IS TERMINAL_ACCEL_FILTER.
     IF H_CORRIDOR_MODE AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
         SET CURRENT_ACCEL_FILTER TO TERMINAL_HIGH_ENERGY_ACCEL_FILTER.
+    }
+    // Above 500 m the slow dense-air handoff is necessary: immediate direct
+    // cancellation drove the stage to 23 degrees and failed formal speed in
+    // Run 152. Below that measured surface, remove the second command-memory
+    // pole so Run 151's stored request cannot survive another velocity sign
+    // change. The aerodynamic estimate itself remains filtered.
+    IF FINAL_DESCENT_ARMED
+        AND HOOK_HEIGHT <= FINAL_CAPTURE_DIRECT_CONTROL_HEIGHT {
+        SET CURRENT_ACCEL_FILTER TO 1.
     }
     IF FIXED_STOP_COMMITTED_THIS_TICK {
         // Commitment is a one-way mode transition. Do not carry the preceding
@@ -2178,8 +2557,21 @@ UNTIL HOOK_CAPTURED() {
             }
         }
     }
+    // The 75% main-burn ceiling is an upstream trajectory allocation, not a
+    // landing limit.  Run 178 reached the 2 km state legally, but the same
+    // ceiling then held vertical thrust at about 16.1 m/s2 all the way to the
+    // water even though the energy corridor requested more braking.  After a
+    // legal one-way capture commitment and below the formal ASL plane, expose
+    // full continuous authority; no target, horizontal law, or waypoint state
+    // changes here.
+    LOCAL TERMINAL_VERTICAL_THRUST_FRACTION IS
+        TERMINAL_NOMINAL_THRUST_FRACTION.
+    IF FINAL_DESCENT_ARMED
+        AND SHIP:ALTITUDE < TERMINAL_WAYPOINT_HEIGHT {
+        SET TERMINAL_VERTICAL_THRUST_FRACTION TO 1.
+    }
     SET VERTICAL_THRUST_CMD TO CLAMP(VERTICAL_THRUST_CMD, 0,
-        AVAILABLE_ACC * TERMINAL_NOMINAL_THRUST_FRACTION).
+        AVAILABLE_ACC * TERMINAL_VERTICAL_THRUST_FRACTION).
 
     // Keep full entry authority through the 2 km waypoint, then taper it
     // smoothly to the 12-degree landing cone by 500 m.  The former 800 m
@@ -2212,6 +2604,26 @@ UNTIL HOOK_CAPTURED() {
     SET ACTIVE_COMMAND_CONE_DEGREES TO MIN(
         ACTIVE_COMMAND_CONE_DEGREES,
         DENSE_AIR_COMMAND_CONE_DEGREES).
+    // Preserve Run 107's identified low-lift branch through the upper dense
+    // segment, then expose additional continuous aerodynamic-brake authority
+    // only where Run 109's measured stopping demand became infeasible.  This
+    // is an actuator envelope; the force-feedback allocator still owns the
+    // actual direction, and the formal physical cone remains 30 degrees.
+    LOCAL FINAL_AERO_BRAKE_CONE_BLEND IS CLAMP(
+        (TERMINAL_FINAL_AERO_BRAKE_CONE_START_HEIGHT - HOOK_HEIGHT)
+        / MAX(TERMINAL_FINAL_AERO_BRAKE_CONE_START_HEIGHT
+            - TERMINAL_FINAL_AERO_BRAKE_CONE_FULL_HEIGHT, 1), 0, 1).
+    LOCAL FINAL_AERO_BRAKE_CONE_RELEASE_BLEND IS CLAMP(
+        (HOOK_HEIGHT - TERMINAL_FINAL_AERO_BRAKE_CONE_RELEASE_END_HEIGHT)
+        / MAX(TERMINAL_WAYPOINT_HEIGHT
+            - TERMINAL_FINAL_AERO_BRAKE_CONE_RELEASE_END_HEIGHT, 1), 0, 1).
+    SET FINAL_AERO_BRAKE_CONE_BLEND TO MIN(
+        FINAL_AERO_BRAKE_CONE_BLEND,
+        FINAL_AERO_BRAKE_CONE_RELEASE_BLEND).
+    SET ACTIVE_COMMAND_CONE_DEGREES TO ACTIVE_COMMAND_CONE_DEGREES
+        + (TERMINAL_FINAL_AERO_BRAKE_CONE_DEGREES
+            - ACTIVE_COMMAND_CONE_DEGREES)
+            * FINAL_AERO_BRAKE_CONE_BLEND.
     // Horizontal braking and tilt are coupled.  When the vertical descent is
     // already riding its speed corridor, its standalone controller can ask
     // for only a few m/s^2 upward.  Using that small number directly in
@@ -2251,7 +2663,7 @@ UNTIL HOOK_CAPTURED() {
                     - VERTICAL_THRUST_CMD) * COUPLING_BLEND.
         }
         SET VERTICAL_THRUST_CMD TO MIN(COUPLED_VERTICAL_THRUST,
-            AVAILABLE_ACC * TERMINAL_NOMINAL_THRUST_FRACTION).
+            AVAILABLE_ACC * TERMINAL_VERTICAL_THRUST_FRACTION).
     }
     LOCAL MAX_H_ACCEL IS MAX(VERTICAL_THRUST_CMD, G_ACC * 0.2)
         * TAN(TILT_LIMIT).
@@ -2615,7 +3027,8 @@ UNTIL HOOK_CAPTURED() {
             MAIN_ALONG_BRAKE_REQUIRED_DECEL
             / MAX(MAIN_ALONG_BRAKE_AVAILABLE_DECEL, 1).
     }
-    LOCAL MAIN_ALONG_BRAKE_AUTHORITY_LIMIT IS 1.
+    LOCAL MAIN_ALONG_BRAKE_AUTHORITY_LIMIT IS
+        TERMINAL_ALONG_BRAKE_MAX_BLEND.
     LOCAL MAIN_ALONG_BRAKE_LATE_BLEND IS 0.
     LOCAL MAIN_ALONG_BRAKE_PRESSURE_BLEND IS CLAMP(
         (MAIN_ALONG_BRAKE_PRESSURE
@@ -2628,6 +3041,8 @@ UNTIL HOOK_CAPTURED() {
             - TERMINAL_ALONG_BRAKE_REACHABILITY_FULL_HEIGHT, 1), 0, 1).
     LOCAL MAIN_ALONG_BRAKE_BLEND IS MAIN_ALONG_BRAKE_PRESSURE_BLEND
         * MAIN_ALONG_BRAKE_HEIGHT_BLEND.
+    SET MAIN_ALONG_BRAKE_BLEND TO MIN(MAIN_ALONG_BRAKE_BLEND,
+        MAIN_ALONG_BRAKE_AUTHORITY_LIMIT).
     // A disabled diagnostic allocator must be completely inert.  Run 49
     // exposed that the old non-zero diagnostic blend still raised the main
     // throttle floor from 75.0% to 75.75%, even though its steering branch was
@@ -2639,26 +3054,6 @@ UNTIL HOOK_CAPTURED() {
         CONTROL_ALONG_DIRECTION).
     LOCAL MAIN_CROSS_H_ACCEL IS H_ACCEL
         - CONTROL_ALONG_DIRECTION * MAIN_ALONG_H_ACCEL.
-    IF TERMINAL_ALONG_BRAKE_ENABLED
-        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
-        AND MAIN_ALONG_BRAKE_BLEND > 0 {
-        LOCAL MAIN_ALONG_BRAKE_REQUEST IS -CONTROL_ALONG_DIRECTION
-                * MAX(ABS(MAIN_ALONG_H_ACCEL),
-                    TERMINAL_ALONG_BRAKE_MIN_REQUEST)
-            + MAIN_CROSS_H_ACCEL.
-        LOCAL MAIN_ALONG_BRAKE_EDGE IS CONSTRAIN_THRUST_VECTOR(
-            MAIN_ALONG_BRAKE_REQUEST, FINAL_THRUST_SAFETY_AXIS,
-            ACTIVE_COMMAND_CONE_DEGREES):NORMALIZED.
-        LOCAL MAIN_ALONG_BRAKE_AXIS IS
-            (STEERING_THRUST:NORMALIZED
-                * (1 - MAIN_ALONG_BRAKE_BLEND)
-            + MAIN_ALONG_BRAKE_EDGE
-                * MAIN_ALONG_BRAKE_BLEND):NORMALIZED.
-        SET STEERING_THRUST TO CONSTRAIN_THRUST_VECTOR(
-            MAIN_ALONG_BRAKE_AXIS, FINAL_THRUST_SAFETY_AXIS,
-            ACTIVE_COMMAND_CONE_DEGREES)
-            * MAX(STEERING_THRUST:MAG, 0.001).
-    }
     LOCAL MAIN_ALONG_COAST_SPEED_BLEND IS CLAMP(
         (MAIN_ALONG_SPEED_DEFICIT
             - TERMINAL_ALONG_SPEED_DEFICIT_ARM)
@@ -2695,7 +3090,11 @@ UNTIL HOOK_CAPTURED() {
     }
     // Run 98 proved that the cubic endpoint request can remain smooth while
     // the physical state has already crossed outside its stopping footprint.
-    // Compare the invariant v^2/(2r) boundary with measured net force instead.
+    // Runs 109-110 then proved that v^2/(2r) controls the eventual ship
+    // crossing, not the required horizontal speed at the formal 2 km height:
+    // moving the ship rewrote the complete 14-6 km force history, and an early
+    // crossing disabled useful one-way braking.  Compare a finite time-to-plane
+    // requirement with measured net force instead.
     // When braking is short, blend toward the *forward/upright* legal cone edge
     // identified in Run 89.  Its engine component is smaller, but the long
     // body's added downrange drag makes it the useful maximum-net-brake
@@ -2705,9 +3104,34 @@ UNTIL HOOK_CAPTURED() {
         (TERMINAL_ALONG_AERO_BRAKE_START_HEIGHT - HOOK_HEIGHT)
         / MAX(TERMINAL_ALONG_AERO_BRAKE_START_HEIGHT
             - TERMINAL_ALONG_AERO_BRAKE_FULL_HEIGHT, 1), 0, 1).
-    LOCAL MAIN_ALONG_AERO_BRAKE_REQUIRED IS
+    LOCAL MAIN_ALONG_AERO_BRAKE_TGO IS
+        2 * MAX(HOOK_HEIGHT - TERMINAL_WAYPOINT_HEIGHT, 0)
+        / MAX(-VERTICAL_V + TERMINAL_WAYPOINT_VERTICAL_SPEED, 1).
+    LOCAL MAIN_ALONG_AERO_BRAKE_TIME_REQUIRED IS MAX(
+        MAIN_ALONG_VEL - TERMINAL_WAYPOINT_MAX_HORIZONTAL_SPEED, 0)
+        / MAX(MAIN_ALONG_AERO_BRAKE_TGO, 0.25)
+        * TERMINAL_ALONG_AERO_BRAKE_MARGIN.
+    LOCAL MAIN_ALONG_AERO_BRAKE_RANGE_REQUIRED IS
         MAIN_ALONG_BRAKE_REQUIRED_DECEL
             * TERMINAL_ALONG_AERO_BRAKE_MARGIN.
+    LOCAL MAIN_ALONG_AERO_BRAKE_STAGE_TGO IS 0.
+    LOCAL MAIN_ALONG_AERO_BRAKE_STAGE_REQUIRED IS 0.
+    IF HOOK_HEIGHT > TERMINAL_ALONG_AERO_BRAKE_STAGE_HEIGHT {
+        SET MAIN_ALONG_AERO_BRAKE_STAGE_TGO TO
+            2 * (HOOK_HEIGHT - TERMINAL_ALONG_AERO_BRAKE_STAGE_HEIGHT)
+            / MAX(-VERTICAL_V
+                + TERMINAL_ALONG_AERO_BRAKE_STAGE_DESCENT_SPEED, 1).
+        SET MAIN_ALONG_AERO_BRAKE_STAGE_REQUIRED TO MAX(
+            MAIN_ALONG_VEL
+                - TERMINAL_ALONG_AERO_BRAKE_STAGE_HORIZONTAL_SPEED, 0)
+            / MAX(MAIN_ALONG_AERO_BRAKE_STAGE_TGO,
+                TERMINAL_ALONG_AERO_BRAKE_STAGE_RESPONSE_SECONDS)
+            * TERMINAL_ALONG_AERO_BRAKE_MARGIN.
+    }
+    LOCAL MAIN_ALONG_AERO_BRAKE_REQUIRED IS MAX(
+        MAIN_ALONG_AERO_BRAKE_STAGE_REQUIRED,
+        MAX(MAIN_ALONG_AERO_BRAKE_TIME_REQUIRED,
+            MAIN_ALONG_AERO_BRAKE_RANGE_REQUIRED)).
     LOCAL MAIN_ALONG_AERO_BRAKE_REALIZED IS MAX(-VDOT(
         POWERED_MEASURED_ACCEL, CONTROL_ALONG_DIRECTION), 0).
     LOCAL MAIN_ALONG_AERO_BRAKE_ERROR IS
@@ -2723,17 +3147,24 @@ UNTIL HOOK_CAPTURED() {
         SET MAIN_ALONG_AERO_BRAKE_RATE TO
             TERMINAL_ALONG_AERO_BRAKE_RELEASE_RATE.
     }
+    // These configuration values are physical scalar-per-second rates.  The
+    // historical controller DT is deliberately capped at 0.1 s, while real
+    // KSP physics samples in Runs 111-113 are about 0.4-0.46 s; using DT made
+    // the actuator respond roughly four times slower than declared.  Retain a
+    // 0.5 s discontinuity cap without assigning fake units to the rate.
+    LOCAL MAIN_ALONG_AERO_BRAKE_RATE_DT IS CLAMP(
+        POWERED_MEASUREMENT_DT, 0.001, 0.5).
     LOCAL MAIN_ALONG_AERO_BRAKE_STEP IS CLAMP(
         MAIN_ALONG_AERO_BRAKE_ERROR
             / MAX(TERMINAL_ALONG_AERO_BRAKE_ACCEL_GAIN, 0.1),
-        -MAIN_ALONG_AERO_BRAKE_RATE * DT,
-        MAIN_ALONG_AERO_BRAKE_RATE * DT).
+        -MAIN_ALONG_AERO_BRAKE_RATE * MAIN_ALONG_AERO_BRAKE_RATE_DT,
+        MAIN_ALONG_AERO_BRAKE_RATE * MAIN_ALONG_AERO_BRAKE_RATE_DT).
     IF NOT TERMINAL_ALONG_AERO_BRAKE_ENABLED
         OR HOOK_HEIGHT <= TERMINAL_WAYPOINT_HEIGHT
-        OR MAIN_ALONG_POS <= TERMINAL_HORIZONTAL_DEADBAND
-        OR MAIN_ALONG_VEL <= 0.1 {
+        OR MAIN_ALONG_VEL <= TERMINAL_ALONG_AERO_BRAKE_RELEASE_SPEED {
         SET MAIN_ALONG_AERO_BRAKE_STEP TO
-            -TERMINAL_ALONG_AERO_BRAKE_RELEASE_RATE * DT.
+            -TERMINAL_ALONG_AERO_BRAKE_RELEASE_RATE
+                * MAIN_ALONG_AERO_BRAKE_RATE_DT.
     } ELSE {
         SET MAIN_ALONG_AERO_BRAKE_STEP TO
             MAIN_ALONG_AERO_BRAKE_STEP
@@ -2742,11 +3173,71 @@ UNTIL HOOK_CAPTURED() {
     SET ALONG_AERO_BRAKE_BLEND_STATE TO CLAMP(
         ALONG_AERO_BRAKE_BLEND_STATE + MAIN_ALONG_AERO_BRAKE_STEP,
         0, TERMINAL_ALONG_AERO_BRAKE_MAX_BLEND).
+    IF TERMINAL_EARLY_AERO_BRAKE_LATCHED
+        AND HOOK_HEIGHT <= TERMINAL_EARLY_AERO_BRAKE_LATCH_HEIGHT
+        AND HOOK_HEIGHT > TERMINAL_EARLY_AERO_BRAKE_HOLD_END_HEIGHT
+        AND MAIN_ALONG_VEL > TERMINAL_ALONG_AERO_BRAKE_RELEASE_SPEED {
+        SET ALONG_AERO_BRAKE_BLEND_STATE TO MAX(
+            ALONG_AERO_BRAKE_BLEND_STATE,
+            TERMINAL_EARLY_AERO_BRAKE_FLOOR).
+    }
+    // The high-drag endpoint is the measured maximum-net-braking actuator in
+    // both the high-q and terminal samples.  Once Run 117 has reached it near
+    // 8 km, do not let an intermediate force surplus unwind the actuator only
+    // to demand it again below 3.5 km.  The margined velocity gate still
+    // removes this ownership before a reversal can be requested.
+    IF HOOK_HEIGHT <= TERMINAL_ALONG_AERO_BRAKE_FULL_HOLD_HEIGHT
+        AND HOOK_HEIGHT
+            > FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_END_HEIGHT
+        AND MAIN_ALONG_VEL > TERMINAL_ALONG_AERO_BRAKE_RELEASE_SPEED {
+        SET ALONG_AERO_BRAKE_BLEND_STATE TO
+            TERMINAL_ALONG_AERO_BRAKE_MAX_BLEND
+                * FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_SCALE.
+    }
+    // The frozen low-ratio branch also bounds tail authority. Run 166's 0.50
+    // crossed fast; Run 167's immediate 0.75 stopped 30 m short. Ramp between
+    // them with height so travel is retained first and braking restored late.
+    // A scale-1 branch remains mathematically unchanged.
+    LOCAL FINAL_ALIGN_TERMINAL_AERO_BRAKE_TAIL_CEILING_BLEND IS CLAMP(
+        (FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_END_HEIGHT - HOOK_HEIGHT)
+        / MAX(FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_END_HEIGHT
+            - FINAL_ALIGN_TERMINAL_AERO_BRAKE_TAIL_CEILING_FULL_HEIGHT,
+            1), 0, 1).
+    LOCAL FINAL_ALIGN_TERMINAL_AERO_BRAKE_TAIL_CEILING IS
+        FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_SCALE
+        + (MAX(FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_SCALE,
+                FINAL_ALIGN_TERMINAL_AERO_BRAKE_MIN_TAIL_CEILING)
+            - FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_SCALE)
+            * FINAL_ALIGN_TERMINAL_AERO_BRAKE_TAIL_CEILING_BLEND.
+    IF FINAL_ALIGN_TERMINAL_PHASE_LATCHED
+        AND HOOK_HEIGHT
+            <= FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_END_HEIGHT
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
+        AND MAIN_ALONG_VEL > TERMINAL_ALONG_AERO_BRAKE_RELEASE_SPEED {
+        SET ALONG_AERO_BRAKE_BLEND_STATE TO MIN(
+            ALONG_AERO_BRAKE_BLEND_STATE,
+            TERMINAL_ALONG_AERO_BRAKE_MAX_BLEND
+                * FINAL_ALIGN_TERMINAL_AERO_BRAKE_TAIL_CEILING).
+    }
+    // Runs 119--121 proved that merely releasing allocator ownership leaves
+    // the fallback trajectory on a 10--15 degree cone while the long stage is
+    // still near 21 degrees, carrying signed speed through zero. Once the
+    // verified high-drag branch has reduced speed to the lead threshold *and*
+    // the physical hook is inside its readiness ring, latch a live
+    // surface-retrograde centre target that damps either velocity sign. Runs
+    // 167--170 proved that speed alone can occur 19--40 m off target.
+    IF NOT ALONG_AERO_BRAKE_LOW_SPEED_SETTLE_ACTIVE
+        AND HOOK_HEIGHT <= TERMINAL_ALONG_AERO_BRAKE_FULL_HOLD_HEIGHT
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
+        AND MAIN_ALONG_VEL <= TERMINAL_ALONG_AERO_BRAKE_RELEASE_SPEED
+        AND MAIN_ALONG_VEL > 0
+        AND HORIZONTAL_POS:MAG <= FINAL_ALIGN_READY_ERROR {
+        SET ALONG_AERO_BRAKE_LOW_SPEED_SETTLE_ACTIVE TO TRUE.
+    }
     LOCAL MAIN_ALONG_AERO_BRAKE_AXIS_DIAG IS 0.
     IF TERMINAL_ALONG_AERO_BRAKE_ENABLED
         AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
-        AND MAIN_ALONG_POS > TERMINAL_HORIZONTAL_DEADBAND
-        AND MAIN_ALONG_VEL > 0.1
+        AND MAIN_ALONG_VEL > TERMINAL_ALONG_AERO_BRAKE_RELEASE_SPEED
         AND MAIN_ALONG_AERO_BRAKE_HEIGHT_BLEND > 0 {
         LOCAL MAIN_ALONG_AERO_BRAKE_REQUEST IS
                 CONTROL_ALONG_DIRECTION
@@ -2913,6 +3404,46 @@ UNTIL HOOK_CAPTURED() {
         SET CROSS_AERO_BRAKE_PREVIOUS_DEMAND TO
             CROSS_STOP_REQUIRED_DECEL_DIAG.
     }
+    // Apply reachability braking only after the high-drag and cross-axis
+    // allocators have produced their actual command. Runs 135--136 exposed
+    // that applying this blend earlier merely let the high-drag branch
+    // overwrite it later in the same update. The 0.35 cap therefore retains
+    // at least 65% of that measured aerodynamic endpoint while finally making
+    // the requested opposite-edge share physical.
+    LOCAL MAIN_ALONG_BRAKE_APPLIED_DIAG IS FALSE.
+    LOCAL MAIN_ALONG_BRAKE_APPLIED_AXIS_DIAG IS 0.
+    IF TERMINAL_ALONG_BRAKE_ENABLED
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
+        AND MAIN_ALONG_BRAKE_BLEND > 0 {
+        LOCAL FINAL_ALONG_BRAKE_REQUEST IS -CONTROL_ALONG_DIRECTION
+                * MAX(ABS(MAIN_ALONG_H_ACCEL),
+                    TERMINAL_ALONG_BRAKE_MIN_REQUEST)
+            + MAIN_CROSS_H_ACCEL.
+        LOCAL FINAL_ALONG_BRAKE_EDGE IS CONSTRAIN_THRUST_VECTOR(
+            FINAL_ALONG_BRAKE_REQUEST, FINAL_THRUST_SAFETY_AXIS,
+            ACTIVE_COMMAND_CONE_DEGREES):NORMALIZED.
+        LOCAL FINAL_ALONG_BRAKE_AXIS IS
+            (STEERING_THRUST:NORMALIZED
+                * (1 - MAIN_ALONG_BRAKE_BLEND)
+            + FINAL_ALONG_BRAKE_EDGE
+                * MAIN_ALONG_BRAKE_BLEND):NORMALIZED.
+        SET STEERING_THRUST TO CONSTRAIN_THRUST_VECTOR(
+            FINAL_ALONG_BRAKE_AXIS, FINAL_THRUST_SAFETY_AXIS,
+            ACTIVE_COMMAND_CONE_DEGREES)
+            * MAX(STEERING_THRUST:MAG, 0.001).
+        SET MAIN_ALONG_BRAKE_APPLIED_DIAG TO TRUE.
+        SET MAIN_ALONG_BRAKE_APPLIED_AXIS_DIAG TO VDOT(
+            STEERING_THRUST:NORMALIZED, CONTROL_ALONG_DIRECTION).
+    }
+    // Apply the low-speed settle after the along/cross arbitration so the
+    // fallback position controller cannot recreate the high-drag cone.  The
+    // centre itself is the mandatory live velocity-cone axis, so it remains
+    // legal and provides sign-symmetric horizontal damping without pursuit.
+    IF ALONG_AERO_BRAKE_LOW_SPEED_SETTLE_ACTIVE
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
+        SET STEERING_THRUST TO FINAL_THRUST_SAFETY_AXIS:NORMALIZED
+            * MAX(STEERING_THRUST:MAG, 0.001).
+    }
     // A command projected inside the load cone is insufficient when its centre
     // (live surface retrograde) rotates quickly near zero horizontal velocity.
     // Use the measured physical angle as a barrier and smoothly pull the target
@@ -3007,6 +3538,8 @@ UNTIL HOOK_CAPTURED() {
     IF FINAL_ALIGN_MODE { SET GUIDANCE_PHASE TO "FINAL_ALIGN". }
     IF FINAL_DESCENT_ARMED { SET GUIDANCE_PHASE TO "VERTICAL_CAPTURE". }
     IF NOW - LAST_LOG >= TELEMETRY_PERIOD {
+        SET GRID_FIN_APPLIED_DEGREES TO
+            BOOSTER_GRID_FIN_APPLIED_DEPLOYMENT().
         LOCAL DIAG_ALONG_POS IS VDOT(WAYPOINT_CONTROL_H_POS,
             CONTROL_ALONG_DIRECTION).
         LOCAL DIAG_ALONG_VEL IS VDOT(HORIZONTAL_VEL,
@@ -3045,6 +3578,52 @@ UNTIL HOOK_CAPTURED() {
         LOG MISSION_ID + ",GUIDANCE_VECTOR," + ROUND(NOW,3)
             + ",h=" + ROUND(HOOK_HEIGHT,2)
             + ",alongPos=" + ROUND(DIAG_ALONG_POS,2)
+            + ",approachOffsetBlend="
+                + ROUND(LIVE_APPROACH_OFFSET_BLEND,3)
+            + ",approachOffsetFinalBlend="
+                + ROUND(LIVE_APPROACH_OFFSET_FINAL_BLEND_STATE,3)
+            + ",approachOffsetRangeAtLatch="
+                + ROUND(LIVE_APPROACH_OFFSET_RANGE_AT_LATCH,2)
+            + ",approachOffsetPostBlend="
+                + ROUND(LIVE_APPROACH_OFFSET_POST_BLEND,3)
+            + ",finalAlignEntryRatio="
+                + ROUND(FINAL_ALIGN_ENTRY_RATIO,4)
+            + ",earlyAeroBrakeLatched="
+                + TERMINAL_EARLY_AERO_BRAKE_LATCHED
+            + ",earlyAeroBrakeEntryRatio="
+                + ROUND(TERMINAL_EARLY_AERO_BRAKE_ENTRY_RATIO,5)
+            + ",earlyAeroBrakeFloor="
+                + ROUND(TERMINAL_EARLY_AERO_BRAKE_FLOOR,3)
+            + ",finalAlignActivePositionGain="
+                + ROUND(FINAL_ALIGN_ACTIVE_POSITION_GAIN,4)
+            + ",finalAlignTerminalLatched="
+                + FINAL_ALIGN_TERMINAL_PHASE_LATCHED
+            + ",finalAlignTerminalEntryRatio="
+                + ROUND(FINAL_ALIGN_TERMINAL_ENTRY_RATIO,4)
+            + ",finalAlignTerminalAeroBrakeHoldScale="
+                + ROUND(FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_SCALE,4)
+            + ",finalAlignTerminalAeroBrakeHoldEndHeight="
+                + ROUND(
+                    FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_END_HEIGHT,1)
+            + ",finalAlignTerminalAeroBrakeTailCeiling="
+                + ROUND(
+                    FINAL_ALIGN_TERMINAL_AERO_BRAKE_TAIL_CEILING,3)
+            + ",finalAlignTerminalFiniteTime="
+                + FINAL_ALIGN_TERMINAL_FINITE_TIME_ACTIVE
+            + ",finalAlignTerminalTgo="
+                + ROUND(FINAL_ALIGN_TERMINAL_TGO,3)
+            + ",finalAlignTerminalControlTgo="
+                + ROUND(FINAL_ALIGN_TERMINAL_CONTROL_TGO,3)
+            + ",finalAlignTerminalControlPos="
+                + ROUND(FINAL_ALIGN_TERMINAL_CONTROL_POS:MAG,3)
+            + ",finalAlignFiniteTimeStartBlend="
+                + ROUND(FINAL_ALIGN_FINITE_TIME_START_BLEND,3)
+            + ",finalAlignFiniteTimeStartHeight="
+                + ROUND(FINAL_ALIGN_FINITE_TIME_START_HEIGHT,1)
+            + ",postWaypointEngineBlend="
+                + ROUND(RETURN_ENGINE_POST_WAYPOINT_BLEND,3)
+            + ",engineMaxAccel="
+                + ROUND(RETURN_ENGINE_CURRENT_MAX_ACCEL,2)
             + ",alongVel=" + ROUND(DIAG_ALONG_VEL,2)
             + ",alongRef=" + ROUND(MAIN_ALONG_REFERENCE_SPEED,2)
             + ",alongCoast=" + ROUND(MAIN_ALONG_COAST_BLEND,3)
@@ -3054,8 +3633,20 @@ UNTIL HOOK_CAPTURED() {
                 + ROUND(MAIN_ALONG_COAST_STEERING_AXIS_DIAG,4)
             + ",alongAeroBrake="
                 + ROUND(ALONG_AERO_BRAKE_BLEND_STATE,4)
+            + ",alongAeroBrakeSettle="
+                + ALONG_AERO_BRAKE_LOW_SPEED_SETTLE_ACTIVE
             + ",alongAeroBrakeHeight="
                 + ROUND(MAIN_ALONG_AERO_BRAKE_HEIGHT_BLEND,3)
+            + ",alongAeroBrakeTgo="
+                + ROUND(MAIN_ALONG_AERO_BRAKE_TGO,2)
+            + ",alongAeroBrakeTimeRequired="
+                + ROUND(MAIN_ALONG_AERO_BRAKE_TIME_REQUIRED,2)
+            + ",alongAeroBrakeRangeRequired="
+                + ROUND(MAIN_ALONG_AERO_BRAKE_RANGE_REQUIRED,2)
+            + ",alongAeroBrakeStageTgo="
+                + ROUND(MAIN_ALONG_AERO_BRAKE_STAGE_TGO,2)
+            + ",alongAeroBrakeStageRequired="
+                + ROUND(MAIN_ALONG_AERO_BRAKE_STAGE_REQUIRED,2)
             + ",alongAeroBrakeRequired="
                 + ROUND(MAIN_ALONG_AERO_BRAKE_REQUIRED,2)
             + ",alongAeroBrakeRealized="
@@ -3065,6 +3656,10 @@ UNTIL HOOK_CAPTURED() {
             + ",alongAeroBrakeAxis="
                 + ROUND(MAIN_ALONG_AERO_BRAKE_AXIS_DIAG,4)
             + ",alongBrake=" + ROUND(MAIN_ALONG_BRAKE_BLEND,3)
+            + ",alongBrakeApplied="
+                + MAIN_ALONG_BRAKE_APPLIED_DIAG
+            + ",alongBrakeAppliedAxis="
+                + ROUND(MAIN_ALONG_BRAKE_APPLIED_AXIS_DIAG,4)
             + ",alongBrakeHeight="
                 + ROUND(MAIN_ALONG_BRAKE_HEIGHT_BLEND,3)
             + ",alongBrakeAuthority="
@@ -3137,6 +3732,9 @@ UNTIL HOOK_CAPTURED() {
                 + CROSS_AERO_BRAKE_RELEASE_STARTED
             + ",commandCone=" + ROUND(VANG(STEERING_THRUST,
                 FINAL_THRUST_SAFETY_AXIS),2)
+            + ",commandAlongAxis=" + ROUND(VDOT(
+                STEERING_THRUST:NORMALIZED,
+                CONTROL_ALONG_DIRECTION),4)
             + ",activeConeLimit="
                 + ROUND(ACTIVE_COMMAND_CONE_DEGREES,2)
             + ",actualCone=" + ROUND(ACTUAL_CONE_GUARD_ANGLE,2)
@@ -3164,6 +3762,23 @@ UNTIL HOOK_CAPTURED() {
                 CONTROL_ALONG_DIRECTION),2)
             + ",aeroUp=" + ROUND(
                 POWERED_FILTERED_VERTICAL_AERO_ACCEL,2)
+            + ",hybridActive=" + HYBRID_CORRIDOR_ACTIVE
+            + ",hybridHRef="
+                + ROUND(HYBRID_HORIZONTAL_REFERENCE,2)
+            + ",hybridHResidual="
+                + ROUND(HYBRID_HORIZONTAL_RESIDUAL,2)
+            + ",hybridDownRef="
+                + ROUND(HYBRID_DOWN_REFERENCE,2)
+            + ",hybridDownResidual="
+                + ROUND(HYBRID_DOWN_RESIDUAL,2)
+            + ",gridFinNominal="
+                + ROUND(GRID_FIN_NOMINAL_COMMAND,2)
+            + ",gridFinDesired="
+                + ROUND(GRID_FIN_DESIRED_COMMAND,2)
+            + ",gridFinCommand="
+                + ROUND(GRID_FIN_DEPLOYMENT_COMMAND,2)
+            + ",gridFinApplied="
+                + ROUND(GRID_FIN_APPLIED_DEGREES,2)
             + ",crossPos=" + ROUND(DIAG_CROSS_POS:MAG,2)
             + ",crossRadialVel=" + ROUND(DIAG_CROSS_RADIAL_VEL,2)
             + ",crossRadialAccel=" + ROUND(DIAG_CROSS_RADIAL_ACCEL,2)
@@ -3193,6 +3808,8 @@ UNTIL HOOK_CAPTURED() {
 }
 
 SET FLIGHT_THROTTLE_CMD TO 0.
+LOCAL GRID_FIN_CAPTURE_STOWED IS
+    SET_BOOSTER_GRID_FIN_DEPLOYMENT(0).
 SET FLIGHT_STEERING_CMD TO UP.
 RCS OFF.
 PRINT "CAPTURE COMPLETE" AT(0,18).

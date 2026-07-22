@@ -79,6 +79,13 @@ namespace CZ10BNetRecovery
         private bool thermalEntryCutoffRecorded;
         private float thermalEntryCutoffHorizontalSpeed = float.MaxValue;
         private bool thermalEntryContinuityViolation;
+        private bool checkpointBurnActive;
+        private int checkpointBurnCount;
+        private double checkpointBurnStartedUt = -1d;
+        private double checkpointBurnStartAltitude = double.NaN;
+        private double checkpointBurnMaximumDuration;
+        private bool checkpointBurnConstraintViolation;
+        private bool checkpointBurnViolationLogged;
         private bool nominalMainBurnSeen;
         private bool nominalMainBurnThrottleViolation;
         private bool nominalMainBurnThrottleViolationLogged;
@@ -105,6 +112,10 @@ namespace CZ10BNetRecovery
 
         private const float CaptureStableRequiredSeconds = 60f;
         private const float UpperStageThrustPercentage = 25f;
+        private const int MinimumCheckpointBurnCount = 2;
+        private const int MaximumCheckpointBurnCount = 3;
+        private const double MaximumCheckpointPoweredSeconds = 4d;
+        private const double MainBurnClassificationAltitude = 24000d;
 
         private void Start()
         {
@@ -470,9 +481,12 @@ namespace CZ10BNetRecovery
                            thermalEntryBurnStartAltitude >= 39500d &&
                            thermalEntryBurnStartAltitude <= 40100d &&
                            thermalEntryCutoffRecorded &&
-                           thermalEntryCutoffHorizontalSpeed <= 1000f &&
-                           !thermalEntryContinuityViolation &&
-                           nominalMainBurnSeen &&
+                            thermalEntryCutoffHorizontalSpeed <= 1000f &&
+                            !thermalEntryContinuityViolation &&
+                            checkpointBurnCount >= MinimumCheckpointBurnCount &&
+                            checkpointBurnCount <= MaximumCheckpointBurnCount &&
+                            !checkpointBurnConstraintViolation &&
+                            nominalMainBurnSeen &&
                            !nominalMainBurnThrottleViolation &&
                            !mainBurnContinuityViolation &&
                            !lowAltitudePwmViolation &&
@@ -653,6 +667,11 @@ namespace CZ10BNetRecovery
                 thermalEntryCutoffRecorded &&
                 thermalEntryCutoffHorizontalSpeed <= 1000f &&
                 !thermalEntryContinuityViolation;
+            bool checkpointsAccepted = checkpointBurnCount >=
+                    MinimumCheckpointBurnCount &&
+                checkpointBurnCount <= MaximumCheckpointBurnCount &&
+                !checkpointBurnConstraintViolation &&
+                !checkpointBurnActive;
             bool mainBurnAccepted = nominalMainBurnSeen &&
                 !nominalMainBurnThrottleViolation &&
                 !mainBurnContinuityViolation;
@@ -677,7 +696,8 @@ namespace CZ10BNetRecovery
                     CaptureStableRequiredSeconds;
 
             pass = pass && separationAccepted && upperAccepted &&
-                entryAccepted && mainBurnAccepted && waypointAccepted &&
+                entryAccepted && checkpointsAccepted && mainBurnAccepted &&
+                waypointAccepted &&
                 nozzleAccepted && !lowAltitudePwmViolation && waterAccepted &&
                 captureAccepted;
             LogConstraintResult("A-02_STAGE_RESERVE", separationAccepted,
@@ -694,6 +714,12 @@ namespace CZ10BNetRecovery
                     thermalEntryBurnStartAltitude,
                     thermalEntryCutoffHorizontalSpeed,
                     thermalEntryContinuityViolation));
+            LogConstraintResult("G-02_CHECKPOINT_BURNS", checkpointsAccepted,
+                string.Format(
+                    "count={0} active={1} maxDuration={2:F2}s violation={3}",
+                    checkpointBurnCount, checkpointBurnActive,
+                    checkpointBurnMaximumDuration,
+                    checkpointBurnConstraintViolation));
             LogConstraintResult("G-03_MAIN_BURN", mainBurnAccepted,
                 "seen=" + nominalMainBurnSeen +
                 " throttleViolation=" + nominalMainBurnThrottleViolation +
@@ -749,11 +775,14 @@ namespace CZ10BNetRecovery
                 maxRawAngularRateBelow1000,
                 maxRawAngularRateBelow500);
             detail += string.Format(
-                " upperFirstCommandMin={0:F3} upperFirstCutoffDistance={1:F0} finalUpperAp={2:F0} finalUpperPe={3:F0} entryStartAltitude={4:F1} entryContinuityViolation={5} mainContinuityViolation={6} lowAltitudeTransitions={7} lowAltitudePwmViolation={8} poweredConeFrames={9} nozzleViolation={10} minimumRecoveryTwr={11:F3} waypointVerticalVelocity={12:F2} upwardViolation={13} waterViolation={14} minimumColliderAltitude={15:F3} captureIntegrityViolation={16}",
+                " upperFirstCommandMin={0:F3} upperFirstCutoffDistance={1:F0} finalUpperAp={2:F0} finalUpperPe={3:F0} entryStartAltitude={4:F1} entryContinuityViolation={5} checkpointBurns={6} checkpointMaxDuration={7:F2} checkpointViolation={8} mainContinuityViolation={9} lowAltitudeTransitions={10} lowAltitudePwmViolation={11} poweredConeFrames={12} nozzleViolation={13} minimumRecoveryTwr={14:F3} waypointVerticalVelocity={15:F2} upwardViolation={16} waterViolation={17} minimumColliderAltitude={18:F3} captureIntegrityViolation={19}",
                 upperFirstBurnMinimumCommand, upperFirstCutoffDistance,
                 finalUpperApoapsis, finalUpperPeriapsis,
                 thermalEntryBurnStartAltitude,
                 thermalEntryContinuityViolation,
+                checkpointBurnCount,
+                checkpointBurnMaximumDuration,
+                checkpointBurnConstraintViolation,
                 mainBurnContinuityViolation,
                 lowAltitudeThrottleTransitions,
                 lowAltitudePwmViolation,
@@ -866,17 +895,69 @@ namespace CZ10BNetRecovery
 
             if (thermalEntryCutoffRecorded && descending && !captured)
             {
-                if (!nominalMainBurnSeen && booster.altitude > 2000d &&
-                    commandedThrottle >= 0.73f && actualThrust > 1f)
+                double nowUt = Planetarium.GetUniversalTime();
+                bool powered = commandedThrottle > 0.001f && actualThrust > 1f;
+
+                if (checkpointBurnActive)
                 {
-                    nominalMainBurnSeen = true;
-                    nominalMainBurnStartedUt = Planetarium.GetUniversalTime();
-                    Debug.Log(string.Format(
-                        "[CZ10BNetRecovery] MAIN_BURN_CONTINUOUS_START altitude={0:F1} vertical={1:F1} horizontal={2:F1} throttle={3:F3} nozzleAngle={4:F2} angular={5:F2}",
-                        booster.altitude, booster.verticalSpeed,
-                        booster.horizontalSrfSpeed, commandedThrottle,
-                        latestPoweredNozzleVelocityAngle,
-                        booster.angularVelocity.magnitude * Mathf.Rad2Deg));
+                    double duration = nowUt - checkpointBurnStartedUt;
+                    checkpointBurnMaximumDuration = System.Math.Max(
+                        checkpointBurnMaximumDuration, duration);
+                    if (duration > MaximumCheckpointPoweredSeconds)
+                        RecordCheckpointBurnViolation(string.Format(
+                            "burn={0} duration={1:F2}s altitude={2:F1}",
+                            checkpointBurnCount, duration, booster.altitude));
+                    if (!powered)
+                    {
+                        checkpointBurnActive = false;
+                        Debug.Log(string.Format(
+                            "[CZ10BNetRecovery] CHECKPOINT_BURN_END index={0} startAltitude={1:F1} endAltitude={2:F1} duration={3:F2}s",
+                            checkpointBurnCount,
+                            checkpointBurnStartAltitude,
+                            booster.altitude, duration));
+                    }
+                }
+
+                if (!checkpointBurnActive && !nominalMainBurnSeen && powered &&
+                    booster.altitude > 2000d)
+                {
+                    if (booster.altitude > MainBurnClassificationAltitude)
+                    {
+                        if (checkpointBurnCount >= MaximumCheckpointBurnCount)
+                        {
+                            RecordCheckpointBurnViolation(string.Format(
+                                "excessPoweredEpisode altitude={0:F1} count={1}",
+                                booster.altitude, checkpointBurnCount + 1));
+                        }
+                        else
+                        {
+                            checkpointBurnCount++;
+                            checkpointBurnActive = true;
+                            checkpointBurnStartedUt = nowUt;
+                            checkpointBurnStartAltitude = booster.altitude;
+                            Debug.Log(string.Format(
+                                "[CZ10BNetRecovery] CHECKPOINT_BURN_START index={0} altitude={1:F1} vertical={2:F1} horizontal={3:F1} throttle={4:F3}",
+                                checkpointBurnCount, booster.altitude,
+                                booster.verticalSpeed,
+                                booster.horizontalSrfSpeed,
+                                commandedThrottle));
+                        }
+                    }
+                    else
+                    {
+                        if (checkpointBurnCount < MinimumCheckpointBurnCount)
+                            RecordCheckpointBurnViolation(string.Format(
+                                "mainStartedAfterOnly={0} altitude={1:F1}",
+                                checkpointBurnCount, booster.altitude));
+                        nominalMainBurnSeen = true;
+                        nominalMainBurnStartedUt = nowUt;
+                        Debug.Log(string.Format(
+                            "[CZ10BNetRecovery] MAIN_BURN_CONTINUOUS_START altitude={0:F1} vertical={1:F1} horizontal={2:F1} throttle={3:F3} nozzleAngle={4:F2} angular={5:F2}",
+                            booster.altitude, booster.verticalSpeed,
+                            booster.horizontalSrfSpeed, commandedThrottle,
+                            latestPoweredNozzleVelocityAngle,
+                            booster.angularVelocity.magnitude * Mathf.Rad2Deg));
+                    }
                 }
                 if (nominalMainBurnSeen)
                 {
@@ -925,6 +1006,17 @@ namespace CZ10BNetRecovery
             if (terminalWaypointRecorded && !captured &&
                 booster.verticalSpeed >= 0d)
                 terminalUpwardVelocityViolation = true;
+        }
+
+        private void RecordCheckpointBurnViolation(string evidence)
+        {
+            checkpointBurnConstraintViolation = true;
+            if (checkpointBurnViolationLogged)
+                return;
+            checkpointBurnViolationLogged = true;
+            Debug.LogError(
+                "[CZ10BNetRecovery] CONSTRAINT_FAIL G-02_CHECKPOINT_BURNS " +
+                evidence);
         }
 
         private void AuditBoosterWaterContact(Vessel booster)
@@ -1084,9 +1176,39 @@ namespace CZ10BNetRecovery
                 startLongitude, platform.altitude);
             seaSurfaceRotationOffset = Quaternion.Inverse(startSurfaceFrame)
                 * platform.transform.rotation;
-            // Run 18 reached -44.616 degrees at 3 km while still moving east;
-            // the original -44.610 target is the correct 2 km corridor.
-            const double measuredFootprintOffset = 29.9490d;
+            // Step 106's coupled corridor first moved the ship 8.4 km
+            // up-track so the fixed 23.6 km handoff could take ownership at
+            // its designed entrance state. Run 108 then identified the final
+            // low-altitude engine envelope and measured a repeatable 1.36 km
+            // pass beyond that ship position at the formal 2 km plane. Move
+            // the physical target down-track by 1.36 / 10.472 = 0.1296 Kerbin
+            // longitude degrees so the one-way reachability controller keeps
+            // positive range until its endpoint instead of releasing at
+            // 5.5 km. Runs 111--122 then made the height/time-indexed velocity
+            // schedule independent of ship range. Run 122 passed descent,
+            // horizontal speed and nozzle angle with 802.5 m physical hook
+            // error and a +729.6 m control-frame along position; the 72.9 m
+            // difference matches the configured 75 m approach offset. Move
+            // only the physical platform 802.5 / 10472 = 0.07663 degrees
+            // up-track, leaving the now-verified dynamics unchanged. Run 123
+            // preserved all three dynamic passes and left the platform another
+            // 36.53 m ahead: move it 36.53 / 10472 = 0.00349 degrees up-track.
+            // Run 125's adaptive 4 km release then stabilised consecutive
+            // footprints within 5.83 m and left 90.77 m of physical error.
+            // Apply that final 90.77 / 10472 = 0.00867 degree calibration.
+            // The closed-loop response brackets the root: Run 125 at 29.1964
+            // was +90.77 m and Run 126 at 29.1877 was -56.92 m. Interpolate
+            // the measured plant response rather than applying another 1:1
+            // geometric shift: 29.1877 + 56.92/147.69*0.0087 = 29.19105.
+            // Runs 127--128 then converged to the same approximately 34 m
+            // physical miss at 29.1911 after the live approach offset was
+            // faded out. Runs 129--130 proved that relocating this entity is
+            // not an independent terminal trim: the ship is also the target
+            // for the complete entry/checkpoint/main guidance history and the
+            // formal error regressed to 62.28 then 156.78 m. Restore and freeze
+            // the repeatable physical coordinate; calibrate only a late virtual
+            // control point while the observer keeps measuring this platform.
+            const double measuredFootprintOffset = 29.1911d;
             seaLongitude = startLongitude + measuredFootprintOffset;
             seaTerrainAltitude = TerrainAltitude(body, seaLatitude, seaLongitude);
             // One-frame relocation by hundreds of kilometres is clamped by

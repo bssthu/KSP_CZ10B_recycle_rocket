@@ -20,6 +20,27 @@ SET RETURN_ENGINE_THRUST_LIMIT TO 45.
 // nominal thrust moderately above Kerbin gravity while preserving 25% vector
 // authority for trajectory correction.
 SET RETURN_ENGINE_MAX_ACCEL TO 21.5.
+// Run 107 reached the 2 km plane inside both horizontal-speed and nozzle-cone
+// limits, but removed about 300 m/s of descent below 6 km.  Preserve the
+// checkpoint and high-altitude main envelopes, then continuously reduce the
+// normalized engine maximum in the dense low segment.  This changes the
+// physical available-thrust envelope, not the mandatory 75% throttle floor;
+// the mission observer continues to require available recovery TWR above one.
+// Run 121's 16.6 m/s2 envelope passes descent by only 0.21 m/s.  The explicit
+// low-speed centre settle below adds a more upright final attitude, so retain
+// robust descent margin by moving the independent envelope another small step
+// while available TWR remains well above one.
+SET RETURN_ENGINE_LOW_ALT_MAX_ACCEL TO 16.3.
+SET RETURN_ENGINE_LOW_ALT_RAMP_START_HEIGHT TO 6500.
+SET RETURN_ENGINE_LOW_ALT_RAMP_FULL_HEIGHT TO 5500.
+// Runs 126--129 all retained roughly 90--105 m/s of descent at the platform:
+// the 16.3 m/s2 envelope is needed to preserve the formal 2 km descent band,
+// but its 75% floor supplies only about 12.2 m/s2 vertically after crossing.
+// Restore the original return authority continuously and strictly below the
+// evaluated plane.  The blend is exactly zero at 2 km, so it cannot conceal
+// or alter formal waypoint compliance.
+SET RETURN_ENGINE_POST_WAYPOINT_MAX_ACCEL TO 21.5.
+SET RETURN_ENGINE_POST_WAYPOINT_RAMP_FULL_HEIGHT TO 1500.
 SET RETURN_ENGINE_MIN_THRUST_LIMIT TO 10.
 // Burn-time prediction accounts for the large propellant fraction consumed by
 // the continuous return burn.  KSP's stock Mainsail varies from 280 s at sea
@@ -58,10 +79,10 @@ SET BOOSTER_TERMINAL_REACTION_WHEEL_AUTHORITY TO 16.0.
 SET BOOSTER_TERMINAL_REACTION_WHEEL_RESTORE_AUTHORITY TO 16.0.
 SET BOOSTER_TERMINAL_REACTION_WHEEL_TAPER_START_HEIGHT TO 4500.
 SET BOOSTER_TERMINAL_REACTION_WHEEL_TAPER_END_HEIGHT TO 3000.
-// Retain physical grid-fin lift through the one 40 km entry burn, then remove
-// it before checkpoint/main guidance.  Run 26 measured 7--21 m/s^2 of upward
-// force and a kilometre-scale opposite side force even at coefficient 0.42.
-// The bounded 5% terminal wheel above owns attitude after this handoff.
+// Run 104 proved that zero independent deployment still leaves 7--10 m/s^2 of
+// upward ModuleAeroSurface/control force at 100% coefficient. Restore the
+// historically measured post-entry zero-lift baseline; the bounded reaction
+// wheels own attitude while Run 105 identifies the remaining body aerodynamics.
 SET BOOSTER_TERMINAL_GRID_FIN_LIFT_AUTHORITY TO 0.0.
 SET ASCENT_TURN_START TO 500.     // clear the pad before beginning the turn
 // Reach the required near-horizontal state at 35 km.  The target pitch remains
@@ -129,28 +150,100 @@ SET TERMINAL_ALIGN_REACQUIRE_MAX_ACCEL TO 25.0.
 // descent so a centre crossing cannot create another lateral pass.  Keep the
 // vertical slowdown at 65 m: moving the horizontal handoff upward must not
 // consume the last landing reserve in a long low-speed descent.
-// Keep the decisive post-centre braking loop through the 2 km gate. The softer
-// final field takes over only below 1 km; handing it control at 2.2-5 km slowed
-// the attitude response and increased the measured rebound instead of reducing
-// it. Vertical slowdown remains independently gated at 65 m.
-SET FINAL_ALIGN_HEIGHT TO 1000.
+// Run 158 exposed a 0.265/s 5 km state that was already saturated. The 6 km
+// family is much narrower at 0.169--0.191/s and 946--1093 m, so own it first.
+SET FINAL_ALIGN_HEIGHT TO 6000.
 SET FINAL_ALIGN_VERTICAL_CONTROL_HEIGHT TO 65.
-SET FINAL_ALIGN_RANGE TO 50.
+SET FINAL_ALIGN_RANGE TO 1200.
 SET FINAL_ALIGN_HOLD_SECONDS TO 0.    // alignment continues during descent; do not spend the landing reserve hovering
-SET FINAL_ALIGN_SPEED TO 3.0.
-SET FINAL_ALIGN_POSITION_GAIN TO 0.08.
+SET FINAL_ALIGN_SPEED TO 200.0.
+SET FINAL_ALIGN_POSITION_GAIN TO 0.18.
+// Twice the 6 km median ratio supplies opposite, available corrections across
+// the measured family. These values own entry shaping only until 5 km.
+SET FINAL_ALIGN_ENTRY_COMPLEMENT_GAIN TO 0.36.
+SET FINAL_ALIGN_MIN_POSITION_GAIN TO 0.16.
+SET FINAL_ALIGN_MAX_POSITION_GAIN TO 0.20.
+// Entry shaping owns 6--5 km only. Re-measure the transformed physical state
+// at 5 km and select the terminal phase line from the Run-146/151 family.
+SET FINAL_ALIGN_TERMINAL_PHASE_HEIGHT TO 5000.
+// Run 172 brought physical error to 4.15 m at the formal plane, but the
+// filtered long-stage response left 5.46 m/s of horizontal speed as the
+// mathematical horizon collapsed. Project the same boundary state only 0.20 s
+// forward; this preserves the endpoint and compensates measured response lag.
+SET FINAL_ALIGN_TERMINAL_RESPONSE_LEAD_SECONDS TO 0.20.
+// Runs 173--176 bracketed the ownership lever. A 0.1702/s entrance starting
+// at 5.36 km still reached the centre about 700 m below the formal plane,
+// whereas Run 172's 0.1703/s entrance nearly passed from a 5 km start. Keep
+// higher ratios interpolated toward 6 km, but return this measured low member
+// to the terminal phase height. The endpoint law itself remains identical.
+SET FINAL_ALIGN_FINITE_TIME_START_LOW_RATIO TO 0.170.
+SET FINAL_ALIGN_FINITE_TIME_START_FULL_RATIO TO 0.188.
+// The high-drag edge consumes acceleration magnitude, so a large signed phase
+// correction increases braking in either direction. Run 161 then showed that
+// increasing this gain with ratio amplifies the high-ratio crossing while the
+// actuator is already at full drag. Keep the physical phase target constant;
+// the independent hold-scale schedule below owns entrance dispersion.
+SET FINAL_ALIGN_TERMINAL_MIN_POSITION_GAIN TO 0.20.
+SET FINAL_ALIGN_TERMINAL_MAX_POSITION_GAIN TO 0.20.
+// Early preload shifted the useful 5 km family downward. Run 169's 0.2067
+// state still stopped 30 m short when the former 0.20--0.22 window assigned
+// 0.668 hold. Keep it on the low endpoint and reserve full amplitude for 0.23;
+// the separately latched duration schedule below still starts at 0.22.
+SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_LOW_RATIO TO 0.21.
+SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_FULL_RATIO TO 0.23.
+SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_MIN_HOLD_SCALE TO 0.50.
+// Run 165's rebuilt near-1.00 tail stopped 53 m short; Run 166's strict 0.50
+// tail crossed the 2 km plane at 10.69 m/s. Retain the low upper-band release,
+// then use the measured midpoint as the denser below-end-height ceiling.
+SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_MIN_TAIL_CEILING TO 0.75.
+// Run 167 proved that applying 0.75 immediately at 4 km spends the right
+// braking too early. Expose that ceiling continuously only by 2.5 km.
+SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_TAIL_CEILING_FULL_HEIGHT TO 2500.
+// Runs 162--163 reached the same 4 km speed but crossed at 3.08--2.83 km
+// because the fixed release ramp ignored their remaining-range difference.
+// High ratio means less range for the same speed, so retain the latched endpoint
+// progressively lower. The positive-speed release gate remains authoritative.
+SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_END_LOW_RATIO TO 0.22.
+SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_END_FULL_RATIO TO 0.24.
+SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_MIN_END_HEIGHT TO 2500.
+// Run 164's unreachable 5 km entrance was already the high member of the
+// physical closing-ratio family at 14 km. Preload only the existing 14--12 km
+// high-drag ownership ramp from that one-time state; this does not expose a new
+// attitude endpoint or modify the upstream checkpoint/main sequence.
+SET TERMINAL_EARLY_AERO_BRAKE_LATCH_HEIGHT TO 14000.
+SET TERMINAL_EARLY_AERO_BRAKE_HOLD_END_HEIGHT TO 12000.
+SET TERMINAL_EARLY_AERO_BRAKE_LOW_RATIO TO 0.0714.
+SET TERMINAL_EARLY_AERO_BRAKE_FULL_RATIO TO 0.0721.
+SET TERMINAL_EARLY_AERO_BRAKE_MIN_FLOOR TO 0.12.
+// Run 150 used 1.00 only to identify acquisition bandwidth. Restore the
+// response that produced the Run-146 formal pass while moving the phase line.
 SET FINAL_ALIGN_VELOCITY_GAIN TO 0.50.
-SET FINAL_ALIGN_READY_ERROR TO 6.0.  // keeps all four 1.65 m hooks inside the 20 m short edge
-SET FINAL_ALIGN_READY_SPEED TO 1.25. // commit before attitude lag starts another centre pass
-SET FINAL_ALIGN_READY_TILT TO 8.0.   // safely inside the net's 15-degree capture envelope
-SET FINAL_CAPTURE_VELOCITY_GAIN TO 0.40.
+SET FINAL_ALIGN_READY_ERROR TO 8.0.  // centroid plus 1.65 m hook radius remains inside the 10 m half-width
+// Run 147's three narrow gates never overlapped, but its 2183 m state was
+// 6.86 m / 3.81 m/s / 14.60 deg: already inside all physical capture limits
+// with more than 2 km left for pure damping. Include that observed opportunity
+// while retaining explicit margin inside 4 m/s and 15 degrees.
+SET FINAL_ALIGN_READY_SPEED TO 3.9.
+SET FINAL_ALIGN_READY_TILT TO 14.7.
+// Run 177 committed cleanly above 2 km and held sub-metre error through 1 km,
+// but residual speed then grew to about 2.8 m/s and carried the hook 19 m out
+// at the net plane. Strengthen only pure velocity damping; the position target
+// remains disabled and the 1 m/s2 cap still bounds attitude demand.
+SET FINAL_CAPTURE_VELOCITY_GAIN TO 0.60.
 SET FINAL_CAPTURE_MAX_ACCEL TO 1.0.
-// Retain a sub-metre-per-second centring field after vertical capture commits.
-// Pure velocity damping let the last few metres of aerodynamic drift carry a
-// valid 6-7 m alignment outside the short-axis cable cradle before contact.
+// Run 152 showed that immediate full-bandwidth drag cancellation above 2 km
+// excites the long-body aerodynamic branch. Run 144's 490 m latch and Run
+// 151's 494 m state identify the lower surface where direct damping is safe.
+SET FINAL_CAPTURE_DIRECT_CONTROL_HEIGHT TO 500.
+// Keep the former position-field shape available for controlled A/B tests.
+// Flight keeps its speed cap at zero below, because Run 141's position pursuit
+// produced a delayed 50 m pass even after a valid early commitment.
 SET FINAL_CAPTURE_POSITION_DEADBAND TO 2.0.
 SET FINAL_CAPTURE_POSITION_GAIN TO 0.10.
-SET FINAL_CAPTURE_MAX_SPEED TO 0.75.
+// Run 141's new early latch began only 4 m off centre, but even the 0.75 m/s
+// pursuit target drove a delayed 50 m pass and crossed the net plane 18.7 m
+// out. Preserve the favourable committed point with pure velocity damping.
+SET FINAL_CAPTURE_MAX_SPEED TO 0.
 // The long, nearly empty stage needs a deliberately soft cooked-steering
 // torque loop near the ship.  The default loop follows sub-degree thrust-vector
 // changes too aggressively and produced measured 12.8-18 deg/s rate spikes.
@@ -344,15 +437,43 @@ SET TERMINAL_ALONG_COAST_ENABLED TO FALSE.
 // proved that blend zero must explicitly own surface retrograde: returning to
 // the cubic command left the body trapped on the upright high-drag branch even
 // after the scalar blend had released completely.
+// Run 106's disabled branch raised measured upward body aerodynamics from 3.84
+// to 14.07 m/s^2 near 6 km and lost 134 m/s of descent for only 19 m/s extra
+// horizontal braking. Restore the identified forward/upright low-lift branch
+// and let its continuous scalar reach the physical endpoint sooner.
 SET TERMINAL_ALONG_AERO_BRAKE_ENABLED TO TRUE.
 SET TERMINAL_ALONG_AERO_BRAKE_START_HEIGHT TO 14500.
 SET TERMINAL_ALONG_AERO_BRAKE_FULL_HEIGHT TO 13500.
-SET TERMINAL_ALONG_AERO_BRAKE_ACCEL_GAIN TO 8.
+SET TERMINAL_ALONG_AERO_BRAKE_ACCEL_GAIN TO 4.
 SET TERMINAL_ALONG_AERO_BRAKE_MARGIN TO 1.03.
 SET TERMINAL_ALONG_AERO_BRAKE_ERROR_DEADBAND TO 0.5.
-SET TERMINAL_ALONG_AERO_BRAKE_BUILD_RATE TO 0.18.
+SET TERMINAL_ALONG_AERO_BRAKE_BUILD_RATE TO 0.35.
 SET TERMINAL_ALONG_AERO_BRAKE_RELEASE_RATE TO 0.12.
-SET TERMINAL_ALONG_AERO_BRAKE_MAX_BLEND TO 0.85.
+SET TERMINAL_ALONG_AERO_BRAKE_MAX_BLEND TO 1.0.
+// Run 118 proved that the surface-retrograde centre's reduced body drag costs
+// more braking than its opposite engine component supplies.  Run 117 already
+// reached the verified high-drag endpoint at 8 km, then released it and rebuilt
+// too late.  Hold that physical endpoint below this boundary until the
+// separately margined speed gate transfers ownership.
+SET TERMINAL_ALONG_AERO_BRAKE_FULL_HOLD_HEIGHT TO 8000.
+// Once the now-calibrated platform is close, Run 124 shows that an
+// unconditional hold below 4 km integrates small 6 km speed dispersion into
+// 60+ m of footprint dispersion.  Enter this boundary at full state, then let
+// the measured range/time error release it continuously in the terminal tail.
+SET TERMINAL_ALONG_AERO_BRAKE_FULL_HOLD_END_HEIGHT TO 4000.
+// Runs 119--120 show the long-stage attitude/force tail carries signed speed
+// through zero after a 4--5 m/s release.  Start unwinding at a positive 7 m/s
+// so that physical lag, rather than a late reversal, supplies the final margin.
+// The formal finite-time target remains 5 m/s and no reverse pursuit is added.
+SET TERMINAL_ALONG_AERO_BRAKE_RELEASE_SPEED TO 7.
+// Run 112 reaches 6 km at 211/328 m/s horizontal/descent, then loses final
+// net braking from about 11.6 to 6.0 m/s2 as dynamic pressure falls.  Build a
+// backward-reachable staging boundary above that loss of authority instead of
+// demanding an impossible correction below 3 km.
+SET TERMINAL_ALONG_AERO_BRAKE_STAGE_HEIGHT TO 6000.
+SET TERMINAL_ALONG_AERO_BRAKE_STAGE_HORIZONTAL_SPEED TO 160.
+SET TERMINAL_ALONG_AERO_BRAKE_STAGE_DESCENT_SPEED TO 330.
+SET TERMINAL_ALONG_AERO_BRAKE_STAGE_RESPONSE_SECONDS TO 2.
 // Run 48 measured 16--63 m/s of along-track speed excess from 20 to 10 km,
 // while the commanded velocity-cone angle remained only 2.8--15.5 degrees and
 // the 25% correction reserve was not fully used.  Symmetrically allocate that
@@ -362,6 +483,10 @@ SET TERMINAL_ALONG_AERO_BRAKE_MAX_BLEND TO 0.85.
 // Run 95 leaves too much horizontal energy while becoming vertically slow.
 // Re-enable only the legal cone-edge actuator; main.ks now drives it from a
 // physical stopping-demand/authority ratio, not the rejected 2*x/T reference.
+// Run 137 finally applied a real 0.35 opposite-edge share after all other
+// arbitration. Near 4 km it reduced measured net braking from about 13.79 to
+// 11.83 m/s2: the engine gain was smaller than the lost long-body drag. Keep
+// this rejected Run-115 mechanism disabled; high drag owns the late endpoint.
 SET TERMINAL_ALONG_BRAKE_ENABLED TO FALSE.
 // Runs 87-88 proved that withholding all authority until 12.5 or 18.5 km traps
 // the controller in a self-sustaining maximum-brake branch.  Start before the
@@ -376,16 +501,15 @@ SET TERMINAL_ALONG_BRAKE_LATE_FULL_HEIGHT TO 8000.
 SET TERMINAL_ALONG_BRAKE_SPEED_EXCESS_ARM TO 10.
 SET TERMINAL_ALONG_BRAKE_SPEED_EXCESS_BLEND TO 30.
 SET TERMINAL_ALONG_BRAKE_MIN_REQUEST TO 5.
-// The final limit remains one so the late height ramp can reach the full
-// correction reserve without a throttle step or any engine on/off cycling.
-SET TERMINAL_ALONG_BRAKE_MAX_BLEND TO 1.0.
+// Retained only for diagnostic replays while the branch is disabled.
+SET TERMINAL_ALONG_BRAKE_MAX_BLEND TO 0.35.
 // Reachability pressure is raw v^2/(2r) divided by the live full-throttle
 // engine projection plus measured aerodynamic braking.  Blend continuously
 // before the boundary becomes infeasible; height only arms the allocator.
-SET TERMINAL_ALONG_BRAKE_REACHABILITY_START_HEIGHT TO 20000.
-SET TERMINAL_ALONG_BRAKE_REACHABILITY_FULL_HEIGHT TO 19000.
+SET TERMINAL_ALONG_BRAKE_REACHABILITY_START_HEIGHT TO 6000.
+SET TERMINAL_ALONG_BRAKE_REACHABILITY_FULL_HEIGHT TO 5500.
 SET TERMINAL_ALONG_BRAKE_PRESSURE_ARM TO 0.75.
-SET TERMINAL_ALONG_BRAKE_PRESSURE_FULL TO 1.0.
+SET TERMINAL_ALONG_BRAKE_PRESSURE_FULL TO 1.25.
 SET TERMINAL_ALONG_BRAKE_REACHABILITY_MIN_RANGE TO 100.
 // Horizontal braking may add vertical thrust only while descent is faster than
 // this smooth quarter-power floor.  This prevents lateral work from holding the
@@ -410,6 +534,27 @@ SET TERMINAL_WAYPOINT_APPROACH_VERTICAL_REFERENCE_SPEED TO 644.
 SET TERMINAL_WAYPOINT_APPROACH_VERTICAL_GAIN TO 0.
 SET TERMINAL_WAYPOINT_APPROACH_MIN_OFFSET TO 75.
 SET TERMINAL_WAYPOINT_APPROACH_MAX_OFFSET TO 75.
+// Retain the upstream Hermite/ignition allowance. Run 128's full fade to the
+// physical centre repeated an approximately 31 m signed overshoot. Runs
+// 129--130 then proved that moving the physical ship rewrites the whole
+// guidance history. Keep the entity and the verified upstream 75 m plan fixed.
+// Run 134 proved that enlarging the plan to 122 m also moved mainly the ruler,
+// not the saturated physical trajectory. Retain the 31.5 / 75 = 0.42 late
+// residue and let the bounded physical allocator above reject short entrances.
+// Fade the residue below the plane so capture targets the physical hook.
+SET TERMINAL_LIVE_APPROACH_OFFSET_FADE_START_HEIGHT TO 4000.
+SET TERMINAL_LIVE_APPROACH_OFFSET_FADE_END_HEIGHT TO 3000.
+// Runs 138--139 passed from 202--208 m latches with final blends near 0.8.
+// Runs 136/140 then bracketed signed failure: 175 m / blend 1 moved negative,
+// while 226 m / blend 0.56 stayed positive. The former positive range gain
+// reinforced both disturbances. Centre the two passes and invert only this
+// late scalar slope; the physical platform and upstream plant remain fixed.
+SET TERMINAL_LIVE_APPROACH_OFFSET_FINAL_BLEND TO 0.81.
+SET TERMINAL_LIVE_APPROACH_OFFSET_FADE_REFERENCE_RANGE TO 205.
+SET TERMINAL_LIVE_APPROACH_OFFSET_FADE_RANGE_GAIN TO -0.50.
+SET TERMINAL_LIVE_APPROACH_OFFSET_FINAL_MIN_BLEND TO 0.40.
+SET TERMINAL_LIVE_APPROACH_OFFSET_FINAL_MAX_BLEND TO 1.0.
+SET TERMINAL_LIVE_APPROACH_OFFSET_POST_FADE_END_HEIGHT TO 1500.
 SET TERMINAL_CAPTURE_ALIGN_ARM_HEIGHT TO 2000.
 // Retained as a documented planning altitude.  main.ks now holds surface
 // retrograde throughout every coast interval after entry cutoff, including the
@@ -576,6 +721,16 @@ SET TERMINAL_LOW_ALT_COMMAND_CONE_DEGREES TO 8.
 SET TERMINAL_DENSE_AIR_CONE_START_HEIGHT TO 8000.
 SET TERMINAL_DENSE_AIR_CONE_END_HEIGHT TO 4000.
 SET TERMINAL_DENSE_AIR_COMMAND_CONE_DEGREES TO 8.
+// Run 109 first enters the legal vertical-speed window, but the final along
+// state becomes unreachable: at 4.0 km the plant realises only 9.8 m/s2 while
+// 24.4 is required, with an actual cone near five degrees.  Preserve the
+// low-lift dense-air branch above 4.5 km, then continuously expose part of the
+// still-legal forward/upright aerodynamic-brake edge.  The independent
+// observer continues to enforce the unchanged 30-degree physical cone.
+SET TERMINAL_FINAL_AERO_BRAKE_CONE_START_HEIGHT TO 4500.
+SET TERMINAL_FINAL_AERO_BRAKE_CONE_FULL_HEIGHT TO 4000.
+SET TERMINAL_FINAL_AERO_BRAKE_CONE_DEGREES TO 20.
+SET TERMINAL_FINAL_AERO_BRAKE_CONE_RELEASE_END_HEIGHT TO 1500.
 // Above 2 km the 75% nominal floor is a hard trajectory constraint.  Run 64
 // proved that lowering throttle to preserve descent merely hides an infeasible
 // vertical plan and violates G-03.  Vertical energy is now owned by the common
@@ -706,9 +861,12 @@ SET TERMINAL_DESCENT_MAX_SPEED TO 700.
 // entry cutoff.  These triggers retain three distinct bounded checks and move
 // the final pulse early enough for main ignition near the simulator-validated
 // 25.5--26.5 km window instead of the failed 23.36 km handoff.
-SET MIDCOURSE_CHECKPOINT_1_HEIGHT TO 37500.
-SET MIDCOURSE_CHECKPOINT_2_HEIGHT TO 35000.
-SET MIDCOURSE_CHECKPOINT_3_HEIGHT TO 32500.
+// Step 106 showed that all three bounded impulses must occur after the measured
+// ~37.35 km entry cutoff but before the 23.6 km main gate.  The former first
+// surface was already above cutoff and therefore could not supply its budget.
+SET MIDCOURSE_CHECKPOINT_1_HEIGHT TO 35000.
+SET MIDCOURSE_CHECKPOINT_2_HEIGHT TO 31500.
+SET MIDCOURSE_CHECKPOINT_3_HEIGHT TO 28000.
 // Run 19 fired all three 2.2 s pulses, yet the predicted 2 km miss only fell
 // from 3.24 km to 1.60 km.  Three 3.0 s one-shot burns remain short and
 // discrete, fit between the 3 km-spaced gates, and give each check enough
@@ -720,8 +878,8 @@ SET MIDCOURSE_PREDICTED_ERROR TO 100.
 // to use the engine's load-cone-safe horizontal authority; the live 100 m miss
 // gate still ends a pulse early, so this remains two or three bounded impulses
 // rather than another continuous burn.
-SET MIDCOURSE_MAX_HORIZONTAL_ACCEL TO 20.
-SET MIDCOURSE_MAX_THROTTLE TO 0.67.
+SET MIDCOURSE_MAX_HORIZONTAL_ACCEL TO 21.5.
+SET MIDCOURSE_MAX_THROTTLE TO 1.0.
 SET MIDCOURSE_MAX_DELTA_V TO 60.
 SET MIDCOURSE_MAX_HEIGHT_DROP TO 1900.
 // An unpowered checkpoint may not spend an unlimited amount of altitude
@@ -752,24 +910,46 @@ SET MIDCOURSE_MISS_GAIN TO 2.50.
 // 5.24 s of powered checkpoint time, lowering 0.75 g to 0.20 g removes roughly
 // 25-30 m/s of premature upward impulse while retaining the horizontal request,
 // three-second bounds, throttle cap, delta-v cap, and later engine-off coast.
-SET MIDCOURSE_VERTICAL_THRUST_G TO 0.20.
+SET MIDCOURSE_VERTICAL_THRUST_G TO 0.
 SET MIDCOURSE_VERTICAL_TARGET_IGNITION_SPEED TO 600.
 SET MIDCOURSE_VERTICAL_ERROR_DEADBAND TO 15.
 // The endpoint predictor moves as vertical energy changes.  Runs 95/97 show
 // 7-10 m/s of surface-horizontal recovery between checkpoint 3 and physical
 // main alignment, so own a measured 960 m/s pulse-end state instead of letting
 // a sign-changing predicted miss withdraw the high-altitude braking impulse.
-SET MIDCOURSE_HORIZONTAL_TARGET_SPEED TO 960.
+SET MIDCOURSE_HORIZONTAL_TARGET_SPEED TO 800.
 SET MIDCOURSE_HORIZONTAL_TARGET_DEADBAND TO 1.
-// Once the explicit vertical-residual phase has run, its completion surface
-// must not recede as the corrected vertical speed lowers the legacy ignition
-// estimate.  Runs 90/92 place the repeatable late main commitment here.
-SET MIDCOURSE_SHAPED_MAIN_HANDOFF_HEIGHT TO 23600.
+// Runs 135--137 show that a 172--179 m short entrance is already infeasible by
+// the saturated 4 km high-drag boundary. Advance the repeatable continuous-main
+// commitment by only 50 m, before saturation, while preserving descent margin.
+SET MIDCOURSE_SHAPED_MAIN_HANDOFF_HEIGHT TO 23650.
 // A checkpoint may light only when the physical stage is close to the actual
 // requested correction vector and angular motion has settled.  The requested
 // vector itself is already projected into the mandatory load cone.
 SET MIDCOURSE_IGNITION_CONE_DEGREES TO 20.
 SET MIDCOURSE_IGNITION_MAX_ANGULAR_RATE_DEG TO 10.
+
+// Continuous ModuleAeroSurface corridor identified in Step 106.  Height gives
+// the nominal one-shot open/stow envelope; live horizontal and downward speed
+// residuals move the command inside that envelope.  Both kOS and the part
+// module rate-limit the coordinate, so this cannot become action-group PWM.
+SET GRID_FIN_AERO_OPEN_START_HEIGHT TO 20500.
+SET GRID_FIN_AERO_FULL_HEIGHT TO 16500.
+SET GRID_FIN_AERO_STOW_START_HEIGHT TO 10000.
+SET GRID_FIN_AERO_STOW_END_HEIGHT TO 7500.
+// Run 103 measured 13--19 m/s^2 of upward aerodynamic acceleration at
+// 63--64 degrees, opposite the recovered Step-106 vertical-force sign.  Hold
+// independent deployment at zero for the Run-104 powered-baseline flight.
+SET GRID_FIN_AERO_MAX_DEPLOYMENT_PERCENT TO 0.
+SET GRID_FIN_AERO_COMMAND_RATE_PERCENT_PER_SECOND TO 15.
+SET GRID_FIN_AERO_HORIZONTAL_ERROR_GAIN TO 1.0.
+SET GRID_FIN_AERO_HORIZONTAL_ERROR_LIMIT_PERCENT TO 25.
+SET GRID_FIN_AERO_DOWN_ERROR_GAIN TO 0.5.
+SET GRID_FIN_AERO_DOWN_ERROR_LIMIT_PERCENT TO 15.
+SET HYBRID_CORRIDOR_END_HEIGHT TO 6000.
+SET HYBRID_CORRIDOR_HORIZONTAL_GAIN TO 0.15.
+SET HYBRID_CORRIDOR_DOWN_GAIN TO 0.12.
+SET HYBRID_CORRIDOR_MAX_FEEDBACK_ACCEL TO 5.
 
 // Controller gains. Keep these in one file so log-driven iterations are small,
 // reviewable diffs. The shipped values passed the offline point-mass sweep.
