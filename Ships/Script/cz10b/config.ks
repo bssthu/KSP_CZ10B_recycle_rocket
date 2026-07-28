@@ -171,6 +171,134 @@ SET FINAL_ALIGN_TERMINAL_PHASE_HEIGHT TO 5000.
 // mathematical horizon collapsed. Project the same boundary state only 0.20 s
 // forward; this preserves the endpoint and compensates measured response lag.
 SET FINAL_ALIGN_TERMINAL_RESPONSE_LEAD_SECONDS TO 0.20.
+// Run 182 exercised a 0.248 s low-family lead but retained 8.02 m/s at the
+// formal plane. Restore the common response horizon and use the remaining
+// position margin only for late velocity damping. Fade the extra coefficient
+// out before the repeatedly passing 0.177--0.178/s entrance family, and ramp
+// it below 2.6 km so the earlier position travel and aero schedule do not move.
+SET FINAL_ALIGN_TERMINAL_LOW_FAMILY_RATIO TO 0.170.
+SET FINAL_ALIGN_TERMINAL_LOW_FAMILY_END_RATIO TO 0.172.
+SET FINAL_ALIGN_TERMINAL_LOW_RATIO_EXTRA_VELOCITY_COEFFICIENT TO 0.50.
+SET FINAL_ALIGN_TERMINAL_EXTRA_VELOCITY_START_HEIGHT TO 2600.
+SET FINAL_ALIGN_TERMINAL_EXTRA_VELOCITY_FULL_HEIGHT TO 2000.
+// Run 187's 0.1606/s entrance retained 13.46 m/s near the plane because the
+// clamped cubic position term still saturated targetward with coefficient 4.5.
+// Add a second, genuinely terminal stage only for that extreme-low family.
+// Run 191 then exercised the partial blend at 0.1669/s: coefficient 5.326
+// improved speed by 1.40 m/s while retaining 4.65 m position margin. Move the
+// full endpoint upward to 0.165 so this boundary member receives about one more
+// unit of terminal velocity weight; the zero endpoint and extreme maximum stay
+// unchanged.
+SET FINAL_ALIGN_TERMINAL_EXTREME_LOW_FAMILY_RATIO TO 0.165.
+SET FINAL_ALIGN_TERMINAL_EXTREME_LOW_FAMILY_END_RATIO TO 0.168.
+SET FINAL_ALIGN_TERMINAL_EXTREME_EXTRA_VELOCITY_COEFFICIENT TO 4.50.
+// Runs 187/209 matched near 2.6 km. Raising the late coefficient from about
+// 4.5 to 9 improved formal speed by 3.68 m/s, but the 2.5--2.0 km ramp was
+// still too late to reach 5 m/s. The later 4--3 km experiment was first
+// exercised after Run 216. Run 225 then closely matched Run 205: it spent
+// 7.7 m more range and removed 3.7 m/s more speed by 3.5 km, yet regressed
+// both formal gates. Restore the measured late ramp; terminal coefficient
+// authority is unchanged, only its unsupported early timing is rejected.
+SET FINAL_ALIGN_TERMINAL_EXTREME_VELOCITY_START_HEIGHT TO 3000.
+SET FINAL_ALIGN_TERMINAL_EXTREME_VELOCITY_FULL_HEIGHT TO 2300.
+// Runs 206/212 first identified 3 km physical range as the missing low-family
+// phase coordinate. Runs 216/218/219 then showed that a large correction first
+// applied there requests unrealizable acceleration inside the long-stage
+// response tail. Move the same measurement one response window earlier.
+// Near 3.5 km the representative physical ranges are 160 m (Run 206),
+// 154 m (Run 212), 217 m (Run 216), 197 m (Run 218), and 148 m (Run 219).
+// A 160 m reference and unit gain approximately preserve the required
+// Run 216/218 negative corrections, protect Runs 206/212, and replace
+// Run 219's late +50 m saturation with about +12 m of earlier shaping.
+// Run 221 then sampled 3506 m just above an exact 3500 m comparison and did
+// not latch until the next guidance update at 3342 m. Put the comparison at
+// 3600 m so the first discrete eligible update lands near the calibrated
+// 3.5 km state. Keep the separate high-start ownership and hard cap unchanged.
+SET FINAL_ALIGN_TERMINAL_LOW_RANGE_LATCH_HEIGHT TO 3600.
+SET FINAL_ALIGN_TERMINAL_LOW_RANGE_REFERENCE TO 160.0.
+SET FINAL_ALIGN_TERMINAL_LOW_RANGE_POSITION_BIAS_GAIN TO 1.0.
+SET FINAL_ALIGN_TERMINAL_LOW_RANGE_MAX_POSITION_BIAS TO 50.0.
+// Runs 229/237/251/253 share the zero-authority 0.173--0.174 entrance
+// family, yet span formal passes and opposite position misses. Their 3.6 km
+// ranges all overlap at 145--150 m, so the earlier latch cannot separate
+// phase. Projecting the first sub-3.2 km state to a common 3 km height does:
+// passing Runs 214/229/237 measure 48.10/53.07/52.60 m, far-side Runs
+// 230/251 measure 36.30/43.41 m, and near-side Run 253 measures 71.52 m.
+// Apply one signed phase correction around the measured 52 m centre and fade
+// it before the formal plane. Keep both the <=0.172 low family and >=0.175
+// historical pass families mathematically untouched.
+SET FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_START_RATIO TO 0.1720.
+SET FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_FULL_START_RATIO TO 0.1730.
+SET FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_FULL_END_RATIO TO 0.1745.
+SET FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_END_RATIO TO 0.1750.
+SET FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_LATCH_HEIGHT TO 3200.
+SET FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_PROJECTION_HEIGHT TO 3000.
+SET FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_REFERENCE TO 52.0.
+SET FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_POSITION_BIAS_GAIN TO 1.5.
+SET FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_MAX_POSITION_BIAS TO 20.0.
+// Run 218 matched Run 205 near 3 km, but retaining its -33.8 m bias through
+// the endpoint improved position by only 1.36 m while adding 3.92 m/s speed.
+// Run 219 then saturated the opposite sign and requested -16.7 to -45.8 m/s2
+// only after 2.9 km, while measured deceleration weakened. Treat both signs as
+// early phase shaping rather than a permanent endpoint: full at the new latch
+// and zero at the formal plane.
+SET FINAL_ALIGN_TERMINAL_RANGE_BIAS_FADE_START_HEIGHT TO 3500.
+SET FINAL_ALIGN_TERMINAL_RANGE_BIAS_FADE_END_HEIGHT TO 2000.
+// Run 193's normal-high entrance selected coefficient 4.0, then crossed the
+// centre at 2.82 km with 22.6 m/s and stopped 35.84 m on the far side. Gate a
+// small earlier velocity term on the independently measured 5 km terminal
+// ratio. Run 211 then reached 0.2229/s and missed the speed gate by only
+// 0.35 m/s while retaining 3.96 m physical error. Move the zero point down to
+// the measured Run 178 passing boundary; Runs 177/178/189 at or below 0.2206
+// remain untouched, while Run 211-like states receive only a small partial
+// coefficient. This avoids reopening the rejected broad entrance-ratio
+// phase-start interpolation.
+SET FINAL_ALIGN_TERMINAL_HIGH_ENERGY_RATIO TO 0.2206.
+SET FINAL_ALIGN_TERMINAL_HIGH_ENERGY_FULL_RATIO TO 0.230.
+// Run 243 sampled the same isolated normal-high branch at 0.2262 and reached
+// 5.85 m formal position, but speed missed by only 0.18 m/s. Its physical
+// axis remained above the protected settle tilt gate during the centre
+// crossing, so do not weaken that gate. Raise only this bounded ceiling by
+// 10%; the Run 243 blend receives about +0.030 coefficient, while every
+// validated <=0.2206 family remains mathematically unchanged.
+SET FINAL_ALIGN_TERMINAL_HIGH_ENERGY_EXTRA_VELOCITY_COEFFICIENT TO 0.55.
+SET FINAL_ALIGN_TERMINAL_HIGH_ENERGY_VELOCITY_START_HEIGHT TO 5000.
+SET FINAL_ALIGN_TERMINAL_HIGH_ENERGY_VELOCITY_FULL_HEIGHT TO 3000.
+// Runs 190 and 200 isolated the extreme-high terminal family at ratios
+// 0.2596/0.2577 and stopped 58.89/57.85 m on the same far side. Run 204 then
+// used the same 6 km ownership and coefficient 4.5 at ratio about 0.245, yet
+// the old zero endpoint left 49.88 m. Treat that continuous residual as an
+// endpoint phase bias rather than earlier/stronger braking. Run 207 then
+// entered the full 6 km ownership branch at only 0.2373 terminal ratio: an
+// 11.45 m bias reduced the inferred no-bias endpoint from about 47.3 m to
+// 35.9 m. Run 210 supplied the resulting 47 m full-start baseline. Against
+// matched zero-bias Run 204, physical error fell from 49.88 to 24.74 m while
+// both speeds remained near zero: only 0.535 m of physical endpoint moved per
+// commanded metre. Run 244 later used the 90 m baseline but still reached
+// -39.65 m / -1.10 m/s near the formal plane. Applying that measured response,
+// another 60 m predicts about 32 m of target-side endpoint motion. Keep this
+// correction inside the already isolated full high-start family. Run 234
+// exposed the unowned
+// boundary immediately above the protected Run 197 near-pass: terminal ratio
+// 0.2313 received full velocity damping and stopped at -30.1 m / 0.21 m/s,
+// because both range-family weights and the old 0.235 endpoint ramp were zero.
+// Start at Run 197's 0.2295 zero-authority boundary and reach the already
+// calibrated 55 m endpoint at Run 195's measured 0.2301 member.
+SET FINAL_ALIGN_TERMINAL_EXTREME_HIGH_POSITION_BIAS_RATIO TO 0.2295.
+SET FINAL_ALIGN_TERMINAL_EXTREME_HIGH_POSITION_BIAS_FULL_RATIO TO 0.2301.
+SET FINAL_ALIGN_TERMINAL_EXTREME_HIGH_POSITION_BIAS TO 55.0.
+SET FINAL_ALIGN_TERMINAL_EXTREME_HIGH_START_POSITION_BIAS TO 150.0.
+// Runs 244/254/258 all stop at nearly zero speed on the far side, but their
+// signed residual is ordered by the independently latched 4 km physical range.
+// Normalize Run 244's old 90 m baseline to the current 150 m baseline with the
+// measured 0.535 physical/commanded response, then fit all three samples:
+// ranges 214.55/163.72/183.72 m require about 14/154/84 commanded metres.
+// The existing 205 m reference with gain 4 gives 0/165/85 m after clipping.
+// Keep this persistent term inside the full high-start isolation; the separate
+// 3.6 km term remains transient phase shaping and still fades before 2 km.
+SET FINAL_ALIGN_TERMINAL_HIGH_START_4KM_RANGE_REFERENCE TO 205.0.
+SET FINAL_ALIGN_TERMINAL_HIGH_START_4KM_RANGE_BIAS_GAIN TO 4.0.
+SET FINAL_ALIGN_TERMINAL_HIGH_START_4KM_MAX_POSITION_BIAS TO 165.0.
 // Runs 173--176 bracketed the ownership lever. A 0.1702/s entrance starting
 // at 5.36 km still reached the centre about 700 m below the formal plane,
 // whereas Run 172's 0.1703/s entrance nearly passed from a 5 km start. Keep
@@ -178,6 +306,25 @@ SET FINAL_ALIGN_TERMINAL_RESPONSE_LEAD_SECONDS TO 0.20.
 // to the terminal phase height. The endpoint law itself remains identical.
 SET FINAL_ALIGN_FINITE_TIME_START_LOW_RATIO TO 0.170.
 SET FINAL_ALIGN_FINITE_TIME_START_FULL_RATIO TO 0.188.
+// Run 195 sampled almost the same terminal ratio as Run 192 (0.2301/0.2303).
+// Its 5.54 km ownership plus coefficient 4.5 produced 30.25 m / 0.91 m/s,
+// while Run 192's 5.81 km ownership plus coefficient 4.0 produced
+// 8.00 m / 6.48 m/s. Run 197 then combined a 5.70 km start and coefficient
+// 4.454 to reach 7.83 m / 5.02 m/s. Run 202 closely matched its 5 km state,
+// but a 5.559 km start spent 23 m more range by 3 km and stopped 40.89 m far
+// side. Reproduce the measured 5.70 km plateau by 0.1788 while preserving
+// the passing <=0.1780 family and the separate extreme-high 6 km stage.
+SET FINAL_ALIGN_FINITE_TIME_START_MEDIUM_RATIO TO 0.1785.
+SET FINAL_ALIGN_FINITE_TIME_START_MEDIUM_FULL_RATIO TO 0.1788.
+SET FINAL_ALIGN_FINITE_TIME_START_MEDIUM_TARGET_HEIGHT TO 5700.
+// Run 190's 0.1831/s entrance did not acquire finite-time ownership until
+// 5.73 km and crossed the centre at 3.2 km with 32 m/s. Run 192 then showed
+// that extending the correction down to a normal-high 0.1814/s entrance
+// regressed both speed and position when used without the new terminal-energy
+// damping. Keep its independent final 5.8--6 km interpolation restricted to
+// the extreme-high edge.
+SET FINAL_ALIGN_FINITE_TIME_START_HIGH_RATIO TO 0.1828.
+SET FINAL_ALIGN_FINITE_TIME_START_HIGH_FULL_RATIO TO 0.1831.
 // The high-drag edge consumes acceleration magnitude, so a large signed phase
 // correction increases braking in either direction. Run 161 then showed that
 // increasing this gain with ratio amplifies the high-ratio crossing while the
@@ -225,6 +372,47 @@ SET FINAL_ALIGN_READY_ERROR TO 8.0.  // centroid plus 1.65 m hook radius remains
 // while retaining explicit margin inside 4 m/s and 15 degrees.
 SET FINAL_ALIGN_READY_SPEED TO 3.9.
 SET FINAL_ALIGN_READY_TILT TO 14.7.
+// Run 189 passed the physical-hook waypoint but never found a simultaneous
+// strict commitment window. At 2.47 km it was already inside a recoverable
+// 15.78 m / 8.67 m/s / 13.99 deg state; retaining the collapsing cubic horizon
+// then commanded about 20 degrees and rebuilt error. Run 222 repeated the
+// boundary at 2.164 km with 20.30 m / 8.75 m/s / 7.98 deg, but the 16 m gate
+// delayed bounded velocity settle until only 43 m above the formal plane.
+// Run 226 restored the late extreme ramp and reached 14.62 m / 11.66 m/s /
+// 10.38 deg at 2.133 km, followed by a fully acceptable 2.26 m position but
+// 8.60 m/s at the formal plane. The collapsing law requested +31.68 m/s2
+// targetward there, while the old 9 m/s gate never entered. Admit this single
+// measured state by changing only the speed gate; the 21/24 m hysteresis,
+// physical-axis gate, 1 m/s2 cap and strict legal commitment stay unchanged.
+SET FINAL_ALIGN_PRECOMMIT_SETTLE_RANGE TO 21.0.
+SET FINAL_ALIGN_PRECOMMIT_SETTLE_SPEED TO 12.0.
+// Run 230 entered the weak 1 m/s2 settle law at only +1.17 m remaining range
+// while still carrying 11.49 m/s. Run 232 then proved that an unsigned 8 m
+// minimum admits an already-crossed -18.90 m state and releases only after
+// error exceeds 24 m. Measure the footprint on the frozen signed approach
+// axis instead. Runs 245/246 then repeated the discrete boundary: their first
+// safe sub-12 m/s samples were +2.658 m and +4.412 m, just after the prior
+// guidance sample missed the speed gate. A 2.5 m minimum admits both measured
+// safe states while still rejecting Run 230's +1.17 m late transition and
+// every already-crossed negative state.
+SET FINAL_ALIGN_PRECOMMIT_SETTLE_MIN_RANGE TO 2.5.
+// Run 196's new damping created an 11--14 m / 3.16 m/s settle window, but
+// handing off while the physical thrust axis still lagged at 17.07 degrees
+// rebuilt 11.79 m/s in reverse. Run 192 did the same from 18.36 degrees,
+// whereas Run 191's useful handoff was 8.97 degrees and Run 194's near-pass
+// edge was about 14.97 degrees. Require physical-axis convergence first.
+SET FINAL_ALIGN_PRECOMMIT_SETTLE_TILT TO 15.5.
+SET FINAL_ALIGN_PRECOMMIT_REACQUIRE_RANGE TO 24.0.
+SET FINAL_ALIGN_PRECOMMIT_MAX_SPEED TO 1.0.
+// Run 236 validated the signed entry at +8.90 m / 9.57 m/s / 8.56 deg and
+// retained only 1.16 m physical error near the formal plane, but the shared
+// 1 m/s2 cap left 6.02 m/s. The separate 2 m/s2 cap later enabled legal
+// commits, yet Run 248 entered only 199 m above the plane at
+// +17.24 m / 10.93 m/s / 8.76 deg and retained 7.63 m/s formally while
+// position passed at 3.49 m. Add the measured 2.5 m/s2 one-second deficit
+// only to this reversible precommit interval; post-commit recovery keeps its
+// independently safer 1 m/s2 cap below.
+SET FINAL_ALIGN_PRECOMMIT_MAX_ACCEL TO 4.5.
 // Run 177 committed cleanly above 2 km and held sub-metre error through 1 km,
 // but residual speed then grew to about 2.8 m/s and carried the hook 19 m out
 // at the net plane. Strengthen only pure velocity damping; the position target
@@ -232,18 +420,24 @@ SET FINAL_ALIGN_READY_TILT TO 14.7.
 SET FINAL_CAPTURE_VELOCITY_GAIN TO 0.60.
 SET FINAL_CAPTURE_MAX_ACCEL TO 1.0.
 // Run 152 showed that immediate full-bandwidth drag cancellation above 2 km
-// excites the long-body aerodynamic branch. Run 144's 490 m latch and Run
-// 151's 494 m state identify the lower surface where direct damping is safe.
-SET FINAL_CAPTURE_DIRECT_CONTROL_HEIGHT TO 500.
-// Keep the former position-field shape available for controlled A/B tests.
-// Flight keeps its speed cap at zero below, because Run 141's position pursuit
-// produced a delayed 50 m pass even after a valid early commitment.
+// excites the long-body aerodynamic branch. Keep that pre-formal regime
+// protected. Run 214, however, made a legal commitment and reached
+// 6.10 m / 0.65 m/s at 1.50 km; the slow command-memory filter then rebuilt
+// drift to 37.83 m / 7.20 m/s before the old 500 m handoff. Remove the second
+// pole from that last safe committed state. FINAL_DESCENT_ARMED keeps this
+// change strictly post-commit and the height remains below the formal plane.
+SET FINAL_CAPTURE_DIRECT_CONTROL_HEIGHT TO 1500.
+// Run 141's 0.75 m/s pursuit acted through the old slow command-memory filter
+// and produced a delayed 50 m pass, so the speed cap was set to zero. Run 229
+// is the first formal pass and strict commitment after moving direct control
+// up to 1.5 km. Pure velocity damping then stopped the lateral speed but
+// allowed position to drift from 3--5 m to about 60 m before the net. Restore
+// the same bounded pursuit only in the already-committed mode: the new 1.5 km
+// direct handoff removes the old second pole, while the 1 m/s2 acceleration
+// cap and 2 m deadband remain unchanged.
 SET FINAL_CAPTURE_POSITION_DEADBAND TO 2.0.
 SET FINAL_CAPTURE_POSITION_GAIN TO 0.10.
-// Run 141's new early latch began only 4 m off centre, but even the 0.75 m/s
-// pursuit target drove a delayed 50 m pass and crossed the net plane 18.7 m
-// out. Preserve the favourable committed point with pure velocity damping.
-SET FINAL_CAPTURE_MAX_SPEED TO 0.
+SET FINAL_CAPTURE_MAX_SPEED TO 0.75.
 // The long, nearly empty stage needs a deliberately soft cooked-steering
 // torque loop near the ship.  The default loop follows sub-degree thrust-vector
 // changes too aggressively and produced measured 12.8-18 deg/s rate spikes.
@@ -256,6 +450,15 @@ SET TERMINAL_STEERING_PITCH_YAW_TS TO 8.0.
 SET TERMINAL_STEERING_ROLL_TS TO 5.0.
 SET TERMINAL_STEERING_MAX_STOPPING_TIME TO 2.0.
 SET TERMINAL_STEERING_TORQUE_FACTOR TO 1.0.
+// Run 252 stayed controlled through roughly 209--142 m, then transverse
+// attitude rate grew through 25--54 deg/s below the net. Run 254's axis
+// diagnostics independently measured 16.98 deg/s transverse rate against
+// only 0.59 deg/s axial roll, with a well-conditioned roll reference. kOS
+// defines MAXSTOPPINGTIME as the target angular-rate limit proportional to
+// available torque/inertia. Lower it only after legal commitment and before
+// the measured onset; keep the 8/5 s torque-loop settling times unchanged.
+SET FINAL_CAPTURE_NEAR_NET_STEERING_HEIGHT TO 250.
+SET FINAL_CAPTURE_NEAR_NET_MAX_STOPPING_TIME TO 0.5.
 // The high-dynamic-pressure waypoint handoff needs a short, forceful turn.
 // These values are restored to the soft profile above before final capture.
 SET TERMINAL_COAST_STEERING_PITCH_YAW_TS TO 0.5.
@@ -346,10 +549,18 @@ SET MAIN_IGNITION_PRELEAD_DEGREES TO 22.
 // off/on transition; the normal gravity-compensating command is higher.
 SET TERMINAL_MIN_CONTINUOUS_THROTTLE TO 0.03.
 SET TERMINAL_WAYPOINT_HEIGHT TO 2000.
-// Aim at the centre of the mandatory 150--200 m/s band.  Runs 65--66 used a
+// Aim near the centre of the mandatory 150--200 m/s band. Runs 65--66 used a
 // deliberately fast 225 m/s planning endpoint to compensate for excessive
 // thrust; that compensation is invalid after correcting the actuator scale.
-SET TERMINAL_WAYPOINT_VERTICAL_SPEED TO 175.
+// Run 217 put every horizontal gate inside but reached 200.33 m/s descent.
+// Lowering this endpoint from 175 to 174 m/s retained broad lower-gate margin.
+// Run 228 then genuinely exercised the 12 m/s reversible settle, passed both
+// horizontal gates by wide margins, but reached 200.47 m/s descent. Moving the
+// endpoint from 174 to 173 produced Run 229's 199.74 m/s pass. Run 237's newly
+// validated 2 m/s2 horizontal settle again passed every horizontal gate but
+// reached 200.72 m/s. Move the same consistent endpoint one final metre
+// slower; 22 m/s nominal margin remains above the lower gate.
+SET TERMINAL_WAYPOINT_VERTICAL_SPEED TO 172.
 SET TERMINAL_WAYPOINT_MIN_VERTICAL_SPEED TO 150.
 SET TERMINAL_WAYPOINT_MAX_VERTICAL_SPEED TO 200.
 SET TERMINAL_WAYPOINT_MAX_HORIZONTAL_SPEED TO 5.

@@ -1235,7 +1235,14 @@ LOCAL FINAL_ALIGN_TERMINAL_ENTRY_RATIO IS -1.
 LOCAL FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_SCALE IS 1.
 LOCAL FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_END_HEIGHT IS
     TERMINAL_ALONG_AERO_BRAKE_FULL_HOLD_END_HEIGHT.
+LOCAL FINAL_ALIGN_TERMINAL_LOW_RANGE_LATCHED IS FALSE.
+LOCAL FINAL_ALIGN_TERMINAL_LOW_RANGE_AT_LATCH IS -1.
+LOCAL FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_LATCHED IS FALSE.
+LOCAL FINAL_ALIGN_TERMINAL_MIDDLE_PROJECTED_RANGE_AT_LATCH IS -1.
 LOCAL FINAL_DESCENT_ARMED IS FALSE.
+LOCAL FINAL_ALIGN_PRECOMMIT_SETTLE IS FALSE.
+LOCAL FINAL_CAPTURE_DIRECT_AERO_RESET IS FALSE.
+LOCAL FINAL_CAPTURE_NEAR_NET_STEERING_TUNED IS FALSE.
 LOCAL TERMINAL_STEERING_TUNED IS FALSE.
 LOCAL FILTERED_H_ACCEL IS V(0,0,0).
 LOCAL LIVE_APPROACH_OFFSET_FINAL_BLEND_STATE IS
@@ -2167,6 +2174,137 @@ UNTIL HOOK_CAPTURED() {
     LOCAL FINAL_ALIGN_TERMINAL_TGO IS 0.
     LOCAL FINAL_ALIGN_TERMINAL_CONTROL_TGO IS 0.
     LOCAL FINAL_ALIGN_TERMINAL_CONTROL_POS IS V(0,0,0).
+    LOCAL FINAL_ALIGN_TERMINAL_ACTIVE_RESPONSE_LEAD_SECONDS IS
+        FINAL_ALIGN_TERMINAL_RESPONSE_LEAD_SECONDS.
+    LOCAL FINAL_ALIGN_TERMINAL_LOW_FAMILY_BLEND IS 1 - CLAMP(
+        (FINAL_ALIGN_ENTRY_RATIO
+            - FINAL_ALIGN_TERMINAL_LOW_FAMILY_RATIO)
+        / MAX(FINAL_ALIGN_TERMINAL_LOW_FAMILY_END_RATIO
+            - FINAL_ALIGN_TERMINAL_LOW_FAMILY_RATIO, 0.0001), 0, 1).
+    LOCAL FINAL_ALIGN_TERMINAL_HIGH_START_RANGE_BLEND IS CLAMP(
+        (FINAL_ALIGN_ENTRY_RATIO
+            - FINAL_ALIGN_FINITE_TIME_START_HIGH_RATIO)
+        / MAX(FINAL_ALIGN_FINITE_TIME_START_HIGH_FULL_RATIO
+            - FINAL_ALIGN_FINITE_TIME_START_HIGH_RATIO,
+            0.0001), 0, 1).
+    LOCAL FINAL_ALIGN_TERMINAL_RANGE_FAMILY_BLEND IS MAX(
+        FINAL_ALIGN_TERMINAL_LOW_FAMILY_BLEND,
+        FINAL_ALIGN_TERMINAL_HIGH_START_RANGE_BLEND).
+    IF FINAL_ALIGN_MODE
+        AND FINAL_ALIGN_TERMINAL_PHASE_LATCHED
+        AND NOT FINAL_DESCENT_ARMED
+        AND NOT FINAL_ALIGN_TERMINAL_LOW_RANGE_LATCHED
+        AND HOOK_HEIGHT <= FINAL_ALIGN_TERMINAL_LOW_RANGE_LATCH_HEIGHT
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
+        // Preserve endpoint phase rather than folding an already-crossed
+        // sample back onto the approach-side magnitude.
+        SET FINAL_ALIGN_TERMINAL_LOW_RANGE_AT_LATCH TO VDOT(
+            HORIZONTAL_POS, CONTROL_ALONG_DIRECTION).
+        SET FINAL_ALIGN_TERMINAL_LOW_RANGE_LATCHED TO TRUE.
+    }
+    LOCAL FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_LOW_BLEND IS CLAMP(
+        (FINAL_ALIGN_ENTRY_RATIO
+            - FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_START_RATIO)
+        / MAX(FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_FULL_START_RATIO
+            - FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_START_RATIO,
+            0.0001), 0, 1).
+    LOCAL FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_HIGH_BLEND IS 1 - CLAMP(
+        (FINAL_ALIGN_ENTRY_RATIO
+            - FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_FULL_END_RATIO)
+        / MAX(FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_END_RATIO
+            - FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_FULL_END_RATIO,
+            0.0001), 0, 1).
+    LOCAL FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_BLEND IS MIN(
+        FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_LOW_BLEND,
+        FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_HIGH_BLEND).
+    IF FINAL_ALIGN_MODE
+        AND FINAL_ALIGN_TERMINAL_PHASE_LATCHED
+        AND NOT FINAL_DESCENT_ARMED
+        AND NOT FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_LATCHED
+        AND FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_BLEND > 0
+        AND HOOK_HEIGHT
+            <= FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_LATCH_HEIGHT
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
+        LOCAL FINAL_ALIGN_TERMINAL_MIDDLE_PROJECTION_TGO IS MAX(
+            (HOOK_HEIGHT
+                - FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_PROJECTION_HEIGHT)
+            / MAX(-VERTICAL_V, 1), 0).
+        SET FINAL_ALIGN_TERMINAL_MIDDLE_PROJECTED_RANGE_AT_LATCH TO
+            VDOT(HORIZONTAL_POS, CONTROL_ALONG_DIRECTION)
+            - VDOT(HORIZONTAL_VEL, CONTROL_ALONG_DIRECTION)
+                * FINAL_ALIGN_TERMINAL_MIDDLE_PROJECTION_TGO.
+        SET FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_LATCHED TO TRUE.
+    }
+    LOCAL FINAL_ALIGN_TERMINAL_LOW_RANGE_POSITION_BIAS IS 0.
+    LOCAL FINAL_ALIGN_TERMINAL_RANGE_BIAS_HEIGHT_BLEND IS CLAMP(
+        (HOOK_HEIGHT
+            - FINAL_ALIGN_TERMINAL_RANGE_BIAS_FADE_END_HEIGHT)
+        / MAX(FINAL_ALIGN_TERMINAL_RANGE_BIAS_FADE_START_HEIGHT
+            - FINAL_ALIGN_TERMINAL_RANGE_BIAS_FADE_END_HEIGHT,
+            1), 0, 1).
+    IF FINAL_ALIGN_TERMINAL_LOW_RANGE_LATCHED {
+        SET FINAL_ALIGN_TERMINAL_LOW_RANGE_POSITION_BIAS TO CLAMP(
+            (FINAL_ALIGN_TERMINAL_LOW_RANGE_REFERENCE
+                - FINAL_ALIGN_TERMINAL_LOW_RANGE_AT_LATCH)
+                * FINAL_ALIGN_TERMINAL_LOW_RANGE_POSITION_BIAS_GAIN,
+            -FINAL_ALIGN_TERMINAL_LOW_RANGE_MAX_POSITION_BIAS,
+            FINAL_ALIGN_TERMINAL_LOW_RANGE_MAX_POSITION_BIAS)
+            * FINAL_ALIGN_TERMINAL_RANGE_FAMILY_BLEND
+            * FINAL_ALIGN_TERMINAL_RANGE_BIAS_HEIGHT_BLEND.
+    }
+    LOCAL FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_HEIGHT_BLEND IS CLAMP(
+        (HOOK_HEIGHT - FINAL_ALIGN_TERMINAL_RANGE_BIAS_FADE_END_HEIGHT)
+        / MAX(FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_LATCH_HEIGHT
+            - FINAL_ALIGN_TERMINAL_RANGE_BIAS_FADE_END_HEIGHT, 1), 0, 1).
+    LOCAL FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_POSITION_BIAS IS 0.
+    IF FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_LATCHED {
+        SET FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_POSITION_BIAS TO CLAMP(
+            (FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_REFERENCE
+                - FINAL_ALIGN_TERMINAL_MIDDLE_PROJECTED_RANGE_AT_LATCH)
+                * FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_POSITION_BIAS_GAIN,
+            -FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_MAX_POSITION_BIAS,
+            FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_MAX_POSITION_BIAS)
+            * FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_BLEND
+            * FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_HEIGHT_BLEND.
+    }
+    LOCAL FINAL_ALIGN_TERMINAL_LATE_VELOCITY_BLEND IS CLAMP(
+        (FINAL_ALIGN_TERMINAL_EXTRA_VELOCITY_START_HEIGHT - HOOK_HEIGHT)
+        / MAX(FINAL_ALIGN_TERMINAL_EXTRA_VELOCITY_START_HEIGHT
+            - FINAL_ALIGN_TERMINAL_EXTRA_VELOCITY_FULL_HEIGHT, 1), 0, 1).
+    LOCAL FINAL_ALIGN_TERMINAL_EXTREME_LOW_FAMILY_BLEND IS 1 - CLAMP(
+        (FINAL_ALIGN_ENTRY_RATIO
+            - FINAL_ALIGN_TERMINAL_EXTREME_LOW_FAMILY_RATIO)
+        / MAX(FINAL_ALIGN_TERMINAL_EXTREME_LOW_FAMILY_END_RATIO
+            - FINAL_ALIGN_TERMINAL_EXTREME_LOW_FAMILY_RATIO, 0.0001), 0, 1).
+    LOCAL FINAL_ALIGN_TERMINAL_EXTREME_VELOCITY_BLEND IS CLAMP(
+        (FINAL_ALIGN_TERMINAL_EXTREME_VELOCITY_START_HEIGHT - HOOK_HEIGHT)
+        / MAX(FINAL_ALIGN_TERMINAL_EXTREME_VELOCITY_START_HEIGHT
+            - FINAL_ALIGN_TERMINAL_EXTREME_VELOCITY_FULL_HEIGHT, 1), 0, 1).
+    LOCAL FINAL_ALIGN_TERMINAL_HIGH_ENERGY_BLEND IS CLAMP(
+        (FINAL_ALIGN_TERMINAL_ENTRY_RATIO
+            - FINAL_ALIGN_TERMINAL_HIGH_ENERGY_RATIO)
+        / MAX(FINAL_ALIGN_TERMINAL_HIGH_ENERGY_FULL_RATIO
+            - FINAL_ALIGN_TERMINAL_HIGH_ENERGY_RATIO, 0.0001), 0, 1).
+    LOCAL FINAL_ALIGN_TERMINAL_HIGH_ENERGY_VELOCITY_BLEND IS CLAMP(
+        (FINAL_ALIGN_TERMINAL_HIGH_ENERGY_VELOCITY_START_HEIGHT - HOOK_HEIGHT)
+        / MAX(FINAL_ALIGN_TERMINAL_HIGH_ENERGY_VELOCITY_START_HEIGHT
+            - FINAL_ALIGN_TERMINAL_HIGH_ENERGY_VELOCITY_FULL_HEIGHT, 1), 0, 1).
+    LOCAL FINAL_ALIGN_TERMINAL_EXTREME_HIGH_POSITION_BIAS_BLEND IS CLAMP(
+        (FINAL_ALIGN_TERMINAL_ENTRY_RATIO
+            - FINAL_ALIGN_TERMINAL_EXTREME_HIGH_POSITION_BIAS_RATIO)
+        / MAX(FINAL_ALIGN_TERMINAL_EXTREME_HIGH_POSITION_BIAS_FULL_RATIO
+            - FINAL_ALIGN_TERMINAL_EXTREME_HIGH_POSITION_BIAS_RATIO,
+            0.0001), 0, 1).
+    LOCAL FINAL_ALIGN_TERMINAL_ACTIVE_VELOCITY_COEFFICIENT IS 4
+        + FINAL_ALIGN_TERMINAL_LOW_RATIO_EXTRA_VELOCITY_COEFFICIENT
+            * FINAL_ALIGN_TERMINAL_LOW_FAMILY_BLEND
+            * FINAL_ALIGN_TERMINAL_LATE_VELOCITY_BLEND
+        + FINAL_ALIGN_TERMINAL_EXTREME_EXTRA_VELOCITY_COEFFICIENT
+            * FINAL_ALIGN_TERMINAL_EXTREME_LOW_FAMILY_BLEND
+            * FINAL_ALIGN_TERMINAL_EXTREME_VELOCITY_BLEND
+        + FINAL_ALIGN_TERMINAL_HIGH_ENERGY_EXTRA_VELOCITY_COEFFICIENT
+            * FINAL_ALIGN_TERMINAL_HIGH_ENERGY_BLEND
+            * FINAL_ALIGN_TERMINAL_HIGH_ENERGY_VELOCITY_BLEND.
     LOCAL FINAL_ALIGN_FINITE_TIME_START_BLEND IS CLAMP(
         (FINAL_ALIGN_ENTRY_RATIO
             - FINAL_ALIGN_FINITE_TIME_START_LOW_RATIO)
@@ -2176,6 +2314,46 @@ UNTIL HOOK_CAPTURED() {
         FINAL_ALIGN_TERMINAL_PHASE_HEIGHT
         + (FINAL_ALIGN_HEIGHT - FINAL_ALIGN_TERMINAL_PHASE_HEIGHT)
             * FINAL_ALIGN_FINITE_TIME_START_BLEND.
+    LOCAL FINAL_ALIGN_FINITE_TIME_MEDIUM_START_BLEND IS CLAMP(
+        (FINAL_ALIGN_ENTRY_RATIO
+            - FINAL_ALIGN_FINITE_TIME_START_MEDIUM_RATIO)
+        / MAX(FINAL_ALIGN_FINITE_TIME_START_MEDIUM_FULL_RATIO
+            - FINAL_ALIGN_FINITE_TIME_START_MEDIUM_RATIO, 0.0001), 0, 1).
+    SET FINAL_ALIGN_FINITE_TIME_START_HEIGHT TO
+        FINAL_ALIGN_FINITE_TIME_START_HEIGHT
+        + MAX(FINAL_ALIGN_FINITE_TIME_START_MEDIUM_TARGET_HEIGHT
+                - FINAL_ALIGN_FINITE_TIME_START_HEIGHT, 0)
+            * FINAL_ALIGN_FINITE_TIME_MEDIUM_START_BLEND.
+    LOCAL FINAL_ALIGN_FINITE_TIME_HIGH_START_BLEND IS CLAMP(
+        (FINAL_ALIGN_ENTRY_RATIO
+            - FINAL_ALIGN_FINITE_TIME_START_HIGH_RATIO)
+        / MAX(FINAL_ALIGN_FINITE_TIME_START_HIGH_FULL_RATIO
+            - FINAL_ALIGN_FINITE_TIME_START_HIGH_RATIO, 0.0001), 0, 1).
+    SET FINAL_ALIGN_FINITE_TIME_START_HEIGHT TO
+        FINAL_ALIGN_FINITE_TIME_START_HEIGHT
+        + (FINAL_ALIGN_HEIGHT - FINAL_ALIGN_FINITE_TIME_START_HEIGHT)
+            * FINAL_ALIGN_FINITE_TIME_HIGH_START_BLEND.
+    LOCAL FINAL_ALIGN_TERMINAL_HIGH_START_4KM_POSITION_BIAS IS 0.
+    IF LIVE_APPROACH_OFFSET_RANGE_LATCHED {
+        SET FINAL_ALIGN_TERMINAL_HIGH_START_4KM_POSITION_BIAS TO CLAMP(
+            (FINAL_ALIGN_TERMINAL_HIGH_START_4KM_RANGE_REFERENCE
+                - LIVE_APPROACH_OFFSET_RANGE_AT_LATCH)
+                * FINAL_ALIGN_TERMINAL_HIGH_START_4KM_RANGE_BIAS_GAIN,
+            0,
+            FINAL_ALIGN_TERMINAL_HIGH_START_4KM_MAX_POSITION_BIAS)
+            * FINAL_ALIGN_TERMINAL_HIGH_START_RANGE_BLEND.
+    }
+    // The terminal-ratio residual and the full 6 km ownership residual are
+    // independent observations of the same endpoint phase error. Select the
+    // stronger calibrated estimate rather than adding them.
+    LOCAL FINAL_ALIGN_TERMINAL_ACTIVE_POSITION_BIAS IS MAX(
+        FINAL_ALIGN_TERMINAL_EXTREME_HIGH_POSITION_BIAS
+            * FINAL_ALIGN_TERMINAL_EXTREME_HIGH_POSITION_BIAS_BLEND,
+        FINAL_ALIGN_TERMINAL_EXTREME_HIGH_START_POSITION_BIAS
+            * FINAL_ALIGN_FINITE_TIME_HIGH_START_BLEND)
+        + FINAL_ALIGN_TERMINAL_HIGH_START_4KM_POSITION_BIAS
+        + FINAL_ALIGN_TERMINAL_LOW_RANGE_POSITION_BIAS
+        + FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_POSITION_BIAS.
     IF FINAL_ALIGN_MODE AND NOT FINAL_DESCENT_ARMED {
         // The long stage has about a 1.5 s attitude response.  A deliberately
         // slower velocity loop settles that lag while the stage is held above
@@ -2207,22 +2385,65 @@ UNTIL HOOK_CAPTURED() {
                 / MAX(-VERTICAL_V + TERMINAL_WAYPOINT_VERTICAL_SPEED, 1).
             SET FINAL_ALIGN_TERMINAL_CONTROL_TGO TO MAX(
                 FINAL_ALIGN_TERMINAL_TGO
-                    - FINAL_ALIGN_TERMINAL_RESPONSE_LEAD_SECONDS, 0.5).
+                    - FINAL_ALIGN_TERMINAL_ACTIVE_RESPONSE_LEAD_SECONDS, 0.5).
             SET FINAL_ALIGN_TERMINAL_CONTROL_POS TO HORIZONTAL_POS
+                - CONTROL_ALONG_DIRECTION
+                    * FINAL_ALIGN_TERMINAL_ACTIVE_POSITION_BIAS
                 - HORIZONTAL_VEL
-                    * FINAL_ALIGN_TERMINAL_RESPONSE_LEAD_SECONDS.
+                    * FINAL_ALIGN_TERMINAL_ACTIVE_RESPONSE_LEAD_SECONDS.
             SET H_ACCEL TO FINAL_ALIGN_TERMINAL_CONTROL_POS
                     * (6 / MAX(
                         FINAL_ALIGN_TERMINAL_CONTROL_TGO^2, 0.25))
                 - HORIZONTAL_VEL
-                    * (4 / FINAL_ALIGN_TERMINAL_CONTROL_TGO).
+                    * (FINAL_ALIGN_TERMINAL_ACTIVE_VELOCITY_COEFFICIENT
+                        / FINAL_ALIGN_TERMINAL_CONTROL_TGO).
             SET H_ACCEL TO CLAMPV(H_ACCEL,
                 TERMINAL_MAX_HORIZONTAL_ACCEL).
             SET FINAL_ALIGN_TERMINAL_FINITE_TIME_ACTIVE TO TRUE.
         }
     }
 
-    LOCAL STAGE_TILT IS VANG(SHIP:FACING:FOREVECTOR, UP_VEC).
+    // Before the strict one-way gate, replace the collapsing finite-time
+    // horizon with a bounded approach once the measured Run 189 neighbourhood
+    // is reached. This remains reversible if disturbance carries the stage
+    // outside 24 m, and it cannot expose post-commit vertical authority.
+    // Use the same physical thrust axis as projection, telemetry, and the
+    // strict commitment gate. Range/speed can converge before attitude lag
+    // does; settling during that lag rebuilt the Run 196 reverse pass.
+    LOCAL STAGE_TILT IS VANG(SHIP:FACING:VECTOR, UP_VEC).
+    IF FINAL_ALIGN_MODE AND NOT FINAL_DESCENT_ARMED
+        AND NOT FINAL_ALIGN_PRECOMMIT_SETTLE
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
+        AND HORIZONTAL_POS:MAG <= FINAL_ALIGN_PRECOMMIT_SETTLE_RANGE
+        AND VDOT(HORIZONTAL_POS, CONTROL_ALONG_DIRECTION)
+            >= FINAL_ALIGN_PRECOMMIT_SETTLE_MIN_RANGE
+        AND HORIZONTAL_VEL:MAG <= FINAL_ALIGN_PRECOMMIT_SETTLE_SPEED
+        AND STAGE_TILT <= FINAL_ALIGN_PRECOMMIT_SETTLE_TILT {
+        SET FINAL_ALIGN_PRECOMMIT_SETTLE TO TRUE.
+        SET FILTERED_H_ACCEL TO V(0,0,0).
+    }
+    IF FINAL_ALIGN_PRECOMMIT_SETTLE AND NOT FINAL_DESCENT_ARMED
+        AND HORIZONTAL_POS:MAG
+            > FINAL_ALIGN_PRECOMMIT_REACQUIRE_RANGE {
+        SET FINAL_ALIGN_PRECOMMIT_SETTLE TO FALSE.
+        SET FILTERED_H_ACCEL TO V(0,0,0).
+    }
+    IF FINAL_ALIGN_PRECOMMIT_SETTLE AND NOT FINAL_DESCENT_ARMED {
+        LOCAL PRECOMMIT_DESIRED_H_VEL IS V(0,0,0).
+        IF HORIZONTAL_POS:MAG > FINAL_CAPTURE_POSITION_DEADBAND {
+            SET PRECOMMIT_DESIRED_H_VEL TO HORIZONTAL_POS:NORMALIZED
+                * MIN(FINAL_ALIGN_PRECOMMIT_MAX_SPEED,
+                    (HORIZONTAL_POS:MAG - FINAL_CAPTURE_POSITION_DEADBAND)
+                        * FINAL_CAPTURE_POSITION_GAIN).
+        }
+        SET H_ACCEL TO CLAMPV((PRECOMMIT_DESIRED_H_VEL - HORIZONTAL_VEL)
+            * FINAL_CAPTURE_VELOCITY_GAIN,
+            FINAL_ALIGN_PRECOMMIT_MAX_ACCEL).
+    }
+
+    // The strict one-way gate uses that same physical thrust axis. FOREVECTOR
+    // can already appear upright while the lagging axis still carries lateral
+    // impulse.
     IF FINAL_ALIGN_MODE AND NOT FINAL_DESCENT_ARMED
         AND HORIZONTAL_POS:MAG <= FINAL_ALIGN_READY_ERROR
         AND HORIZONTAL_VEL:MAG <= FINAL_ALIGN_READY_SPEED
@@ -2233,6 +2454,53 @@ UNTIL HOOK_CAPTURED() {
         SET FINAL_DESCENT_ARMED TO TRUE.
         SET FILTERED_H_ACCEL TO V(0,0,0).
         PRINT "VERTICAL CAPTURE COMMITTED" AT(0,11).
+    }
+
+    // Run 252's fixed roll target did not prevent the physical thrust axis
+    // from diverging below the net. Run 254 then measured about 17 deg/s
+    // transverse rate versus only 0.6 deg/s axial roll. Reduce the cooked
+    // steering angular-rate ceiling before that measured surface without
+    // changing the torque-loop settling times or any translation command.
+    IF FINAL_DESCENT_ARMED
+        AND NOT FINAL_CAPTURE_NEAR_NET_STEERING_TUNED
+        AND HOOK_HEIGHT <= FINAL_CAPTURE_NEAR_NET_STEERING_HEIGHT {
+        SET STEERINGMANAGER:MAXSTOPPINGTIME TO
+            FINAL_CAPTURE_NEAR_NET_MAX_STOPPING_TIME.
+        STEERINGMANAGER:RESETPIDS().
+        SET FINAL_CAPTURE_NEAR_NET_STEERING_TUNED TO TRUE.
+        LOG MISSION_ID + ",FINAL_CAPTURE_NEAR_NET_STEERING,"
+            + ROUND(NOW,3)
+            + ",h=" + ROUND(HOOK_HEIGHT,2)
+            + ",axialRate=" + ROUND(VDOT(
+                SHIP:ANGULARVEL, SHIP:FACING:VECTOR)
+                * CONSTANT:RADTODEG,3)
+            + ",transverseRate=" + ROUND(VXCL(
+                SHIP:FACING:VECTOR, SHIP:ANGULARVEL):MAG
+                * CONSTANT:RADTODEG,3)
+            TO "0:/cz10b/telemetry.csv".
+    }
+
+    // Run 240 made a legal commitment, but the 1.5 km direct-control handoff
+    // retained a -4.75 m/s2 horizontal aero estimate while the live raw sample
+    // was only -0.62 m/s2. Subtracting that obsolete state turned a bounded
+    // targetward request into +3.77 m/s2 of target-away engine acceleration.
+    // Clear only this horizontal estimator state on the first committed direct
+    // frame. The vertical estimate and every pre-formal frame remain intact;
+    // the normal aero filter resumes from zero on the following tick.
+    IF FINAL_DESCENT_ARMED AND NOT FINAL_CAPTURE_DIRECT_AERO_RESET
+        AND HOOK_HEIGHT <= FINAL_CAPTURE_DIRECT_CONTROL_HEIGHT {
+        LOG MISSION_ID + ",FINAL_CAPTURE_AERO_RESET,"
+            + ROUND(NOW,3)
+            + ",h=" + ROUND(HOOK_HEIGHT,2)
+            + ",filteredAlong=" + ROUND(VDOT(
+                POWERED_FILTERED_HORIZONTAL_AERO_ACCEL,
+                CONTROL_ALONG_DIRECTION),3)
+            + ",rawAlong=" + ROUND(VDOT(
+                POWERED_HORIZONTAL_AERO_RAW_SAMPLE,
+                CONTROL_ALONG_DIRECTION),3)
+            TO "0:/cz10b/telemetry.csv".
+        SET POWERED_FILTERED_HORIZONTAL_AERO_ACCEL TO V(0,0,0).
+        SET FINAL_CAPTURE_DIRECT_AERO_RESET TO TRUE.
     }
 
     IF PID_MODE {
@@ -2501,7 +2769,8 @@ UNTIL HOOK_CAPTURED() {
     // cancellation drove the stage to 23 degrees and failed formal speed in
     // Run 152. Below that measured surface, remove the second command-memory
     // pole so Run 151's stored request cannot survive another velocity sign
-    // change. The aerodynamic estimate itself remains filtered.
+    // change. Run 240 showed that the aerodynamic estimator carried a second
+    // obsolete state; its one-time committed transition is cleared above.
     IF FINAL_DESCENT_ARMED
         AND HOOK_HEIGHT <= FINAL_CAPTURE_DIRECT_CONTROL_HEIGHT {
         SET CURRENT_ACCEL_FILTER TO 1.
@@ -2676,10 +2945,16 @@ UNTIL HOOK_CAPTURED() {
         AVAILABLE_ACC * TERMINAL_THRUST_LIMIT_FRACTION).
     LOCAL STEERING_THRUST IS DESIRED_THRUST.
     LOCAL STEERING_ROLL_REFERENCE IS SHIP:FACING:TOPVECTOR.
-    IF WAYPOINT_FINAL_COAST_MODE {
+    IF WAYPOINT_FINAL_COAST_MODE OR FINAL_DESCENT_ARMED {
         // A fixed horizontal reference lets the steering manager remove roll.
         // Reusing the stage's instantaneous top vector made the target rotate
         // with the vehicle and preserved a 40-50 deg/s spin below 1 km.
+        // Run 249 reproduced that exact failure after strict commitment:
+        // commanded cone was zero, but the omitted fixed reference let angular
+        // rate reach 41 deg/s and violated the physical nozzle cone near the
+        // net. Share this already validated roll reference with both terminal
+        // upright modes; desired thrust and every translation limit are
+        // unchanged.
         SET STEERING_ROLL_REFERENCE TO
             RECOVERY_SHIP:FACING:STARVECTOR.
     }
@@ -3555,6 +3830,31 @@ UNTIL HOOK_CAPTURED() {
         LOCAL DIAG_CROSS_RAW_AERO_ACCEL IS 0.
         LOCAL DIAG_CROSS_MEASURED_ACCEL IS 0.
         LOCAL DIAG_CROSS_STEERING_AXIS IS 0.
+        // Run 252 proved that a fixed roll reference alone does not prevent
+        // the low-altitude attitude divergence. Split body-axis roll from
+        // transverse pitch/yaw rate before changing the cooked-steering
+        // profile, and record whether either roll projection becomes
+        // geometrically ill-conditioned.
+        LOCAL DIAG_BODY_AXIS IS SHIP:FACING:VECTOR:NORMALIZED.
+        LOCAL DIAG_ANGULAR_VELOCITY IS SHIP:ANGULARVEL.
+        LOCAL DIAG_AXIAL_ANGULAR_RATE_DEG IS VDOT(
+            DIAG_ANGULAR_VELOCITY, DIAG_BODY_AXIS)
+            * CONSTANT:RADTODEG.
+        LOCAL DIAG_TRANSVERSE_ANGULAR_RATE_DEG IS VXCL(
+            DIAG_BODY_AXIS, DIAG_ANGULAR_VELOCITY):MAG
+            * CONSTANT:RADTODEG.
+        LOCAL DIAG_BODY_ROLL_REFERENCE IS VXCL(
+            DIAG_BODY_AXIS, STEERING_ROLL_REFERENCE).
+        LOCAL DIAG_COMMAND_ROLL_REFERENCE IS VXCL(
+            STEERING_THRUST:NORMALIZED, STEERING_ROLL_REFERENCE).
+        LOCAL DIAG_ROLL_ERROR_DEG IS -1.
+        IF DIAG_BODY_ROLL_REFERENCE:MAG > 0.001 {
+            SET DIAG_ROLL_ERROR_DEG TO VANG(
+                SHIP:FACING:TOPVECTOR,
+                DIAG_BODY_ROLL_REFERENCE:NORMALIZED).
+        }
+        LOCAL DIAG_FIXED_ROLL_REFERENCE_ACTIVE IS
+            WAYPOINT_FINAL_COAST_MODE OR FINAL_DESCENT_ARMED.
         IF DIAG_CROSS_POS:MAG > 0.1 {
             SET DIAG_CROSS_RADIAL_VEL TO VDOT(
                 DIAG_CROSS_POS:NORMALIZED, DIAG_CROSS_VEL).
@@ -3616,12 +3916,70 @@ UNTIL HOOK_CAPTURED() {
                 + ROUND(FINAL_ALIGN_TERMINAL_CONTROL_TGO,3)
             + ",finalAlignTerminalControlPos="
                 + ROUND(FINAL_ALIGN_TERMINAL_CONTROL_POS:MAG,3)
+            + ",finalAlignTerminalSignedControlPos="
+                + ROUND(VDOT(FINAL_ALIGN_TERMINAL_CONTROL_POS,
+                    CONTROL_ALONG_DIRECTION),3)
+            + ",finalAlignTerminalResponseLead="
+                + ROUND(
+                    FINAL_ALIGN_TERMINAL_ACTIVE_RESPONSE_LEAD_SECONDS,3)
+            + ",finalAlignTerminalPositionBias="
+                + ROUND(FINAL_ALIGN_TERMINAL_ACTIVE_POSITION_BIAS,3)
+            + ",finalAlignHighStart4kmPositionBias="
+                + ROUND(
+                    FINAL_ALIGN_TERMINAL_HIGH_START_4KM_POSITION_BIAS,3)
+            + ",finalAlignLowRangeLatched="
+                + FINAL_ALIGN_TERMINAL_LOW_RANGE_LATCHED
+            + ",finalAlignLowRangeAtLatch="
+                + ROUND(FINAL_ALIGN_TERMINAL_LOW_RANGE_AT_LATCH,3)
+            + ",finalAlignLowRangePositionBias="
+                + ROUND(
+                    FINAL_ALIGN_TERMINAL_LOW_RANGE_POSITION_BIAS,3)
+            + ",finalAlignMiddleRangeLatched="
+                + FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_LATCHED
+            + ",finalAlignMiddleProjectedRange="
+                + ROUND(
+                    FINAL_ALIGN_TERMINAL_MIDDLE_PROJECTED_RANGE_AT_LATCH,
+                    3)
+            + ",finalAlignMiddleRangePositionBias="
+                + ROUND(
+                    FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_POSITION_BIAS,3)
+            + ",finalAlignMiddleRangeFamilyBlend="
+                + ROUND(FINAL_ALIGN_TERMINAL_MIDDLE_FAMILY_BLEND,3)
+            + ",finalAlignMiddleRangeHeightBlend="
+                + ROUND(
+                    FINAL_ALIGN_TERMINAL_MIDDLE_RANGE_HEIGHT_BLEND,3)
+            + ",finalAlignRangeBiasHeightBlend="
+                + ROUND(
+                    FINAL_ALIGN_TERMINAL_RANGE_BIAS_HEIGHT_BLEND,
+                    3)
+            + ",finalAlignRangeFamilyBlend="
+                + ROUND(
+                    FINAL_ALIGN_TERMINAL_RANGE_FAMILY_BLEND,3)
+            + ",physicalAlongPos="
+                + ROUND(VDOT(
+                    HORIZONTAL_POS, CONTROL_ALONG_DIRECTION),3)
+            + ",physicalCrossPos="
+                + ROUND((HORIZONTAL_POS
+                    - CONTROL_ALONG_DIRECTION * VDOT(
+                        HORIZONTAL_POS,
+                        CONTROL_ALONG_DIRECTION)):MAG,3)
+            + ",finalAlignTerminalVelocityCoefficient="
+                + ROUND(
+                    FINAL_ALIGN_TERMINAL_ACTIVE_VELOCITY_COEFFICIENT,3)
+            + ",finalAlignPrecommitSettle="
+                + FINAL_ALIGN_PRECOMMIT_SETTLE
             + ",finalAlignFiniteTimeStartBlend="
                 + ROUND(FINAL_ALIGN_FINITE_TIME_START_BLEND,3)
+            + ",finalAlignFiniteTimeMediumStartBlend="
+                + ROUND(FINAL_ALIGN_FINITE_TIME_MEDIUM_START_BLEND,3)
+            + ",finalAlignFiniteTimeHighStartBlend="
+                + ROUND(FINAL_ALIGN_FINITE_TIME_HIGH_START_BLEND,3)
             + ",finalAlignFiniteTimeStartHeight="
                 + ROUND(FINAL_ALIGN_FINITE_TIME_START_HEIGHT,1)
             + ",postWaypointEngineBlend="
                 + ROUND(RETURN_ENGINE_POST_WAYPOINT_BLEND,3)
+            + ",finalCaptureDirectAeroReset="
+                + FINAL_CAPTURE_DIRECT_AERO_RESET
             + ",engineMaxAccel="
                 + ROUND(RETURN_ENGINE_CURRENT_MAX_ACCEL,2)
             + ",alongVel=" + ROUND(DIAG_ALONG_VEL,2)
@@ -3741,6 +4099,19 @@ UNTIL HOOK_CAPTURED() {
             + ",coneGuard=" + ROUND(ACTUAL_CONE_GUARD_BLEND,3)
             + ",actualTilt=" + ROUND(VANG(SHIP:FACING:VECTOR,
                 UP_VEC),2)
+            + ",axialAngularRate="
+                + ROUND(DIAG_AXIAL_ANGULAR_RATE_DEG,3)
+            + ",transverseAngularRate="
+                + ROUND(DIAG_TRANSVERSE_ANGULAR_RATE_DEG,3)
+            + ",rollError=" + ROUND(DIAG_ROLL_ERROR_DEG,2)
+            + ",bodyRollReferenceProjection="
+                + ROUND(DIAG_BODY_ROLL_REFERENCE:MAG,4)
+            + ",commandRollReferenceProjection="
+                + ROUND(DIAG_COMMAND_ROLL_REFERENCE:MAG,4)
+            + ",fixedRollReference="
+                + DIAG_FIXED_ROLL_REFERENCE_ACTIVE
+            + ",nearNetSteeringTuned="
+                + FINAL_CAPTURE_NEAR_NET_STEERING_TUNED
             + ",actualAlongAxis=" + ROUND(VDOT(
                 SHIP:FACING:VECTOR, CONTROL_ALONG_DIRECTION),4)
             + ",actualAlongThrust=" + ROUND(VDOT(
