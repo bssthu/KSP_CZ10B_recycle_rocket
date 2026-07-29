@@ -47,6 +47,27 @@ FUNCTION CONSTRAIN_THRUST_VECTOR {
     RETURN LIMITED * REQUEST_MAG.
 }
 
+FUNCTION LIMIT_VECTOR_SLEW {
+    PARAMETER PREVIOUS, REQUESTED, MAX_ANGLE_DEGREES.
+    LOCAL FROM_AXIS IS PREVIOUS:NORMALIZED.
+    LOCAL TO_AXIS IS REQUESTED:NORMALIZED.
+    LOCAL TARGET_ANGLE IS VANG(FROM_AXIS, TO_AXIS).
+    LOCAL STEP_ANGLE IS MAX(MAX_ANGLE_DEGREES, 0).
+    IF TARGET_ANGLE <= STEP_ANGLE { RETURN TO_AXIS. }
+    // Normalized linear interpolation does not produce a constant angular
+    // rate for a large reference change. Move on the great-circle arc so the
+    // configured degrees/second limit remains physical at every target angle.
+    LOCAL TURN_COMPONENT IS VXCL(FROM_AXIS, TO_AXIS).
+    IF TURN_COMPONENT:MAG <= 0.0001 {
+        // An exactly antiparallel request has no unique shortest turn plane.
+        // Hold one sample rather than selecting an arbitrary discontinuity;
+        // the final safety-cone projection still has absolute authority.
+        RETURN FROM_AXIS.
+    }
+    RETURN FROM_AXIS * COS(STEP_ANGLE)
+        + TURN_COMPONENT:NORMALIZED * SIN(STEP_ANGLE).
+}
+
 FUNCTION PRELEAD_THRUST_AXIS {
     PARAMETER UP_VEC, HORIZONTAL_BRAKE, LEAD_DEGREES.
     LOCAL RETROGRADE_AXIS IS THRUST_SAFETY_AXIS(UP_VEC,
@@ -173,16 +194,27 @@ FUNCTION NORMALIZE_BOOSTER_ENGINE_ACCEL {
     RETURN CHANGED.
 }
 
-FUNCTION BOOSTER_HOOK_OFFSET_ALONG_UP {
-    PARAMETER UP_VEC.
+FUNCTION BOOSTER_HOOK_OFFSET_FROM_COM {
     LOCAL BOOSTERS IS SHIP:PARTSNAMED("CZ10B-DemoBooster").
-    IF BOOSTERS:LENGTH = 0 { RETURN HOOK_ABOVE_COM. }
+    IF BOOSTERS:LENGTH = 0 {
+        RETURN SHIP:FACING:FOREVECTOR * HOOK_ABOVE_COM.
+    }
     // The full mission now carries a physically separate 6 t stock engine, so
     // the vessel CoM moves as propellant is consumed. Measure the hook relative
     // to the live CoM instead of assuming the tank origin remains the CoM.
-    LOCAL HOOK_FROM_COM IS BOOSTERS[0]:POSITION - SHIP:POSITION
-        + SHIP:FACING:FOREVECTOR * BOOSTER_HOOK_LOCAL_Y.
-    RETURN VDOT(HOOK_FROM_COM, UP_VEC) - NET_PLANE_OFFSET.
+    // This vector is also the exact centre of the four virtual hook points:
+    // their symmetric 1.65 m radius averages to the configured local-Y point.
+    // ModuleCatchHook uses TransformPoint(0, hookOffsetY, 0). Part:FACING is
+    // the local-to-world rotation in kOS, so rotate that same local-Y vector;
+    // SHIP:FACING:FOREVECTOR would incorrectly use vessel-local Z.
+    RETURN BOOSTERS[0]:POSITION - SHIP:POSITION
+        + BOOSTERS[0]:FACING * V(0, BOOSTER_HOOK_LOCAL_Y, 0).
+}
+
+FUNCTION BOOSTER_HOOK_OFFSET_ALONG_UP {
+    PARAMETER UP_VEC.
+    RETURN VDOT(BOOSTER_HOOK_OFFSET_FROM_COM(), UP_VEC)
+        - NET_PLANE_OFFSET.
 }
 
 FUNCTION FIND_RECOVERY_SHIP {

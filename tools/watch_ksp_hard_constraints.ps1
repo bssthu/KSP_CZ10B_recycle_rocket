@@ -4,12 +4,14 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$LogPath,
     [long]$StartOffset = 0,
-    [string]$ResultPath = ''
+    [string]$ResultPath = '',
+    [switch]$ContinueAfterTerminalFailure
 )
 
 $ErrorActionPreference = 'Stop'
 $offset = $StartOffset
 $pending = ''
+$script:terminalFailure = ''
 
 function Write-GuardResult {
     param([string]$Message)
@@ -20,6 +22,9 @@ function Write-GuardResult {
 
 function Stop-FailedRun {
     param([string]$Reason)
+    if ($script:terminalFailure) {
+        $Reason = $script:terminalFailure + '; downstream=' + $Reason
+    }
     Write-GuardResult ("FAIL " + (Get-Date -Format o) + " " + $Reason)
     Stop-Process -Id $KspProcessId -Force -ErrorAction SilentlyContinue
     exit 2
@@ -27,6 +32,10 @@ function Stop-FailedRun {
 
 function Stop-PassedRun {
     param([string]$Evidence)
+    if ($script:terminalFailure) {
+        Stop-FailedRun ("later in-process pass was invalid after formal failure: " +
+            $Evidence)
+    }
     Write-GuardResult ("PASS " + (Get-Date -Format o) + " " + $Evidence)
     Stop-Process -Id $KspProcessId -Force -ErrorAction SilentlyContinue
     exit 0
@@ -83,9 +92,19 @@ while (Get-Process -Id $KspProcessId -ErrorAction SilentlyContinue) {
                     if ($descent -lt 150.0 -or $descent -gt 200.0 -or
                         $horizontal -gt 5.0 -or $hookError -gt 10.0 -or
                         $nozzle -gt 30.0) {
-                        Stop-FailedRun "TERMINAL_2KM descent=$descent horizontal=$horizontal hookError=$hookError nozzle=$nozzle"
+                        $terminalEvidence = "TERMINAL_2KM descent=$descent horizontal=$horizontal hookError=$hookError nozzle=$nozzle"
+                        if ($ContinueAfterTerminalFailure) {
+                            $script:terminalFailure = $terminalEvidence
+                            Write-GuardResult (
+                                "TERMINAL_FAIL_CONTINUING " +
+                                (Get-Date -Format o) + " " +
+                                $terminalEvidence)
+                        } else {
+                            Stop-FailedRun $terminalEvidence
+                        }
+                    } else {
+                        Write-GuardResult "TERMINAL_PASS descent=$descent horizontal=$horizontal hookError=$hookError nozzle=$nozzle"
                     }
-                    Write-GuardResult "TERMINAL_PASS descent=$descent horizontal=$horizontal hookError=$hookError nozzle=$nozzle"
                 }
                 if ($line -match 'SEA_MISSION_TEST_STATUS' -and
                     $line -match 'nozzleViolation=True') {
@@ -114,5 +133,11 @@ while (Get-Process -Id $KspProcessId -ErrorAction SilentlyContinue) {
     Start-Sleep -Milliseconds 200
 }
 
+if ($script:terminalFailure) {
+    Write-GuardResult (
+        "FAIL " + (Get-Date -Format o) + " " +
+        $script:terminalFailure + "; downstream=process exited")
+    exit 2
+}
 Write-GuardResult ("PROCESS_EXIT " + (Get-Date -Format o))
 exit 3

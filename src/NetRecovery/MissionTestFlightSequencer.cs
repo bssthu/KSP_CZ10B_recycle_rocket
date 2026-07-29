@@ -100,15 +100,24 @@ namespace CZ10BNetRecovery
         private Quaternion seaSurfaceRotationOffset = Quaternion.identity;
         private float maxCaptureHorizontalOffset;
         private float filteredLowAngularRate = -1f;
+        private float filteredLowTransverseAngularRate = -1f;
+        private float latestLowAxialAngularRate;
+        private float latestLowTransverseAngularRate;
         private float maxAngularRateBelow1000;
         private float maxAngularRateBelow500;
         private float maxRawAngularRateBelow1000;
         private float maxRawAngularRateBelow500;
+        private float maxTransverseAngularRateBelow1000;
+        private float maxTransverseAngularRateBelow500;
+        private float lowAltitudeAttitudeViolationDwell;
+        private bool lowAltitudeAttitudeViolation;
+        private double nextLowAltitudeAttitudeStatusUt;
         private bool captureEverEstablished;
         private bool captureIntegrityViolation;
         private float latestPoweredNozzleVelocityAngle = -1f;
         private float latestPoweredRecoveryAvailableTwr = -1f;
         private double nominalMainBurnStartedUt = -1d;
+        private bool gridFinMountingValid;
 
         private const float CaptureStableRequiredSeconds = 60f;
         private const float UpperStageThrustPercentage = 25f;
@@ -126,6 +135,10 @@ namespace CZ10BNetRecovery
                      HasPart(vessel, "CZ10B-DemoUpperStage");
             if (!active)
                 return;
+            gridFinMountingValid = ValidateGridFinMounting(vessel);
+            if (!gridFinMountingValid)
+                Debug.LogError(
+                    "[CZ10BNetRecovery] CONSTRAINT_FAIL P-01_GRID_FIN_ATTACHMENT physical grid-fin mounting invalid");
             string seaMarker = Path.Combine(KSPUtil.ApplicationRootPath, "GameData",
                 "CZ10BRecovery", "PluginData", "sea-mission-flight.active");
             seaMission = File.Exists(seaMarker);
@@ -213,6 +226,16 @@ namespace CZ10BNetRecovery
                 {
                     float lowAngularRate = booster.angularVelocity.magnitude *
                         Mathf.Rad2Deg;
+                    Vector3 bodyAxis = booster.ReferenceTransform == null
+                        ? Vector3.up
+                        : booster.ReferenceTransform.up.normalized;
+                    float axialAngularRate = Mathf.Abs(Vector3.Dot(
+                        booster.angularVelocity, bodyAxis)) * Mathf.Rad2Deg;
+                    float transverseAngularRate = Vector3.ProjectOnPlane(
+                        booster.angularVelocity, bodyAxis).magnitude *
+                        Mathf.Rad2Deg;
+                    latestLowAxialAngularRate = axialAngularRate;
+                    latestLowTransverseAngularRate = transverseAngularRate;
                     // A loaded multi-part vessel can report a one-Update
                     // solver spike even though neither its attitude nor the
                     // controller command visibly changes.  Measure the motion
@@ -220,7 +243,11 @@ namespace CZ10BNetRecovery
                     // still reaches its full value, while a lone physics frame
                     // cannot masquerade as a control oscillation.
                     if (filteredLowAngularRate < 0f)
+                    {
                         filteredLowAngularRate = lowAngularRate;
+                        filteredLowTransverseAngularRate =
+                            transverseAngularRate;
+                    }
                     else
                     {
                         float lowRateBlend = 1f - Mathf.Exp(
@@ -228,6 +255,9 @@ namespace CZ10BNetRecovery
                         filteredLowAngularRate = Mathf.Lerp(
                             filteredLowAngularRate, lowAngularRate,
                             lowRateBlend);
+                        filteredLowTransverseAngularRate = Mathf.Lerp(
+                            filteredLowTransverseAngularRate,
+                            transverseAngularRate, lowRateBlend);
                     }
                     // Warm the filter through the final 200 m before the audit
                     // plane.  Initialising it from the first frame below 1 km
@@ -241,13 +271,54 @@ namespace CZ10BNetRecovery
                             maxAngularRateBelow1000, filteredLowAngularRate);
                         maxRawAngularRateBelow1000 = Mathf.Max(
                             maxRawAngularRateBelow1000, lowAngularRate);
+                        maxTransverseAngularRateBelow1000 = Mathf.Max(
+                            maxTransverseAngularRateBelow1000,
+                            filteredLowTransverseAngularRate);
                         if (booster.altitude <= 500d)
                         {
                             maxAngularRateBelow500 = Mathf.Max(
                                 maxAngularRateBelow500, filteredLowAngularRate);
                             maxRawAngularRateBelow500 = Mathf.Max(
                                 maxRawAngularRateBelow500, lowAngularRate);
+                            maxTransverseAngularRateBelow500 = Mathf.Max(
+                                maxTransverseAngularRateBelow500,
+                                filteredLowTransverseAngularRate);
+                            float attitudeAuditDelta = Mathf.Clamp(
+                                Time.deltaTime, 0f, 0.1f);
+                            if (filteredLowTransverseAngularRate > 10f)
+                                lowAltitudeAttitudeViolationDwell +=
+                                    attitudeAuditDelta;
+                            else
+                                lowAltitudeAttitudeViolationDwell = Mathf.Max(
+                                    lowAltitudeAttitudeViolationDwell -
+                                    attitudeAuditDelta, 0f);
+                            if (!lowAltitudeAttitudeViolation &&
+                                lowAltitudeAttitudeViolationDwell >= 0.2f)
+                            {
+                                lowAltitudeAttitudeViolation = true;
+                                Debug.LogError(string.Format(
+                                    "[CZ10BNetRecovery] CONSTRAINT_FAIL T-02_ATTITUDE_STABILITY altitude={0:F2} rawTotalRate={1:F3} axialRate={2:F3} rawTransverseRate={3:F3} filteredTransverseRate={4:F3} dwell={5:F3}",
+                                    booster.altitude, lowAngularRate,
+                                    axialAngularRate, transverseAngularRate,
+                                    filteredLowTransverseAngularRate,
+                                    lowAltitudeAttitudeViolationDwell));
+                            }
                         }
+                    }
+                    double attitudeStatusUt = Planetarium.GetUniversalTime();
+                    if (booster.altitude <= 600d &&
+                        attitudeStatusUt >= nextLowAltitudeAttitudeStatusUt)
+                    {
+                        nextLowAltitudeAttitudeStatusUt =
+                            attitudeStatusUt + 0.25d;
+                        Debug.Log(string.Format(
+                            "[CZ10BNetRecovery] LOW_ALTITUDE_ATTITUDE_STATUS ut={0:F3} altitude={1:F2} rawTotalRate={2:F3} filteredTotalRate={3:F3} axialRate={4:F3} rawTransverseRate={5:F3} filteredTransverseRate={6:F3} maxTransverseBelow500={7:F3} violation={8}",
+                            attitudeStatusUt, booster.altitude, lowAngularRate,
+                            filteredLowAngularRate, axialAngularRate,
+                            transverseAngularRate,
+                            filteredLowTransverseAngularRate,
+                            maxTransverseAngularRateBelow500,
+                            lowAltitudeAttitudeViolation));
                     }
                 }
                 if (upperSeparated && booster.altitude > 10000)
@@ -506,8 +577,10 @@ namespace CZ10BNetRecovery
                            !boosterWaterContactViolation &&
                            minimumBoosterColliderAltitude > 0d &&
                            !captureIntegrityViolation &&
-                           maxAngularRateBelow1000 <= 10f &&
-                           maxAngularRateBelow500 <= 10f, hook);
+                            maxAngularRateBelow1000 <= 10f &&
+                            maxAngularRateBelow500 <= 10f &&
+                            !lowAltitudeAttitudeViolation &&
+                            gridFinMountingValid, hook);
                 else if (capturedUniversalTime >= 0d &&
                     Planetarium.GetUniversalTime() - capturedUniversalTime >= 90d)
                     Report(false, hook);
@@ -694,12 +767,16 @@ namespace CZ10BNetRecovery
                 hook.hookState == "Captured" && capturedUniversalTime >= 0d &&
                 Planetarium.GetUniversalTime() - capturedUniversalTime >=
                     CaptureStableRequiredSeconds;
+            bool attitudeAccepted = !lowAltitudeAttitudeViolation &&
+                maxAngularRateBelow1000 <= 10f &&
+                maxAngularRateBelow500 <= 10f;
 
             pass = pass && separationAccepted && upperAccepted &&
                 entryAccepted && checkpointsAccepted && mainBurnAccepted &&
                 waypointAccepted &&
                 nozzleAccepted && !lowAltitudePwmViolation && waterAccepted &&
-                captureAccepted;
+                captureAccepted && attitudeAccepted &&
+                gridFinMountingValid;
             LogConstraintResult("A-02_STAGE_RESERVE", separationAccepted,
                 "fraction=" + separationPropellantFraction.ToString("F4"));
             LogConstraintResult("A-04_UPPER_STAGE", upperAccepted,
@@ -743,6 +820,17 @@ namespace CZ10BNetRecovery
                 string.Format("transitions={0} violation={1}",
                     lowAltitudeThrottleTransitions,
                     lowAltitudePwmViolation));
+            LogConstraintResult("T-02_ATTITUDE_STABILITY", attitudeAccepted,
+                string.Format(
+                    "maxFilteredTotalBelow1000={0:F3} maxFilteredTotalBelow500={1:F3} maxFilteredTransverseBelow1000={2:F3} maxFilteredTransverseBelow500={3:F3} violation={4}",
+                    maxAngularRateBelow1000,
+                    maxAngularRateBelow500,
+                    maxTransverseAngularRateBelow1000,
+                    maxTransverseAngularRateBelow500,
+                    lowAltitudeAttitudeViolation));
+            LogConstraintResult("P-01_GRID_FIN_ATTACHMENT",
+                gridFinMountingValid,
+                "four surface parts parented at 1.275 m origin radius");
             LogConstraintResult("S-01_NO_WATER_CONTACT", waterAccepted,
                 string.Format("splashed={0} lowestColliderAltitude={1:F3}",
                     booster == null || booster.Splashed,
@@ -794,6 +882,13 @@ namespace CZ10BNetRecovery
                 boosterWaterContactViolation,
                 minimumBoosterColliderAltitude,
                 captureIntegrityViolation);
+            detail += string.Format(
+                " maxTransverseBelow1000={0:F2} maxTransverseBelow500={1:F2} latestAxialRate={2:F2} latestTransverseRate={3:F2} attitudeViolation={4}",
+                maxTransverseAngularRateBelow1000,
+                maxTransverseAngularRateBelow500,
+                latestLowAxialAngularRate,
+                latestLowTransverseAngularRate,
+                lowAltitudeAttitudeViolation);
             if (pass)
                 Debug.Log("[CZ10BNetRecovery] " + Prefix + "_PASS" + detail);
             else
@@ -809,6 +904,42 @@ namespace CZ10BNetRecovery
                 Debug.Log(message);
             else
                 Debug.LogError(message);
+        }
+
+        private static bool ValidateGridFinMounting(Vessel vessel)
+        {
+            if (vessel == null || vessel.parts == null)
+                return false;
+            Part booster = vessel.parts.FirstOrDefault(part => part != null &&
+                part.partInfo != null &&
+                part.partInfo.name == "CZ10B-DemoBooster");
+            List<Part> gridFins = vessel.parts.Where(part => part != null &&
+                part.partInfo != null &&
+                part.partInfo.name == "CZ10B-GridFin").ToList();
+            if (booster == null || gridFins.Count != 4)
+                return false;
+
+            const float expectedOriginRadius = 1.275f;
+            const float mountingTolerance = 0.03f;
+            float maximumError = 0f;
+            foreach (Part gridFin in gridFins)
+            {
+                if (gridFin.parent != booster)
+                    return false;
+                Vector3 localPosition = booster.transform.InverseTransformPoint(
+                    gridFin.transform.position);
+                float originRadius = new Vector2(
+                    localPosition.x, localPosition.z).magnitude;
+                float mountingError = Mathf.Abs(
+                    originRadius - expectedOriginRadius);
+                maximumError = Mathf.Max(maximumError, mountingError);
+                if (mountingError > mountingTolerance)
+                    return false;
+            }
+            Debug.Log(string.Format(
+                "[CZ10BNetRecovery] P-01_GRID_FIN_ATTACHMENT_VALID count={0} maxOriginRadiusError={1:F4}",
+                gridFins.Count, maximumError));
+            return true;
         }
 
         private string Prefix

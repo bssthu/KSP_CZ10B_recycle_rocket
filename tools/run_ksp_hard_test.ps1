@@ -5,7 +5,8 @@ param(
     [string]$RunLabel,
     [Parameter(Mandatory = $true)]
     [string]$ArchiveDirectory,
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+    [switch]$ContinueAfterTerminalFailure
 )
 
 $ErrorActionPreference = 'Stop'
@@ -77,6 +78,9 @@ try {
         '-StartOffset', [string]$startOffset,
         '-ResultPath', $resultPath
     )
+    if ($ContinueAfterTerminalFailure) {
+        $guardArguments += '-ContinueAfterTerminalFailure'
+    }
     & powershell.exe @guardArguments
     $guardExit = $LASTEXITCODE
 } finally {

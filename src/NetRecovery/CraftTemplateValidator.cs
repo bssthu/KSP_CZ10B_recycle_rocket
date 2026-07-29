@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using UnityEngine;
 
 namespace CZ10BNetRecovery
@@ -38,6 +39,7 @@ namespace CZ10BNetRecovery
                         construct = ShipConstruction.LoadShip(path);
                         if (construct == null || construct.parts == null || construct.parts.Count == 0)
                             throw new InvalidDataException("KSP returned an empty ShipConstruct");
+                        ValidateGridFinMounting(construct, path);
 
                         Debug.Log(string.Format(
                             "[CZ10BNetRecovery] CRAFT_VALID name={0} parts={1} root={2}",
@@ -126,6 +128,51 @@ namespace CZ10BNetRecovery
                 Debug.LogError("[CZ10BNetRecovery] " + logPrefix +
                                "_LAUNCH_FAILED " + error);
             }
+        }
+
+        private static void ValidateGridFinMounting(ShipConstruct construct,
+            string path)
+        {
+            Part booster = construct.parts.FirstOrDefault(part => part != null &&
+                part.partInfo != null &&
+                part.partInfo.name == "CZ10B-DemoBooster");
+            Part[] gridFins = construct.parts.Where(part => part != null &&
+                part.partInfo != null &&
+                part.partInfo.name == "CZ10B-GridFin").ToArray();
+            if (gridFins.Length == 0)
+                return;
+            if (booster == null)
+                throw new InvalidDataException(
+                    "grid fins exist without CZ10B-DemoBooster");
+            if (gridFins.Length != 4)
+                throw new InvalidDataException(
+                    "expected four grid fins, found " + gridFins.Length);
+
+            const float expectedOriginRadius = 1.275f;
+            const float mountingTolerance = 0.03f;
+            float maximumMountingError = 0f;
+            foreach (Part gridFin in gridFins)
+            {
+                if (gridFin.parent != booster)
+                    throw new InvalidDataException(
+                        "grid fin is not surface-attached to the booster");
+                Vector3 localPosition = booster.transform.InverseTransformPoint(
+                    gridFin.transform.position);
+                float originRadius = new Vector2(
+                    localPosition.x, localPosition.z).magnitude;
+                float mountingError = Mathf.Abs(
+                    originRadius - expectedOriginRadius);
+                maximumMountingError = Mathf.Max(
+                    maximumMountingError, mountingError);
+                if (mountingError > mountingTolerance)
+                    throw new InvalidDataException(string.Format(
+                        "grid fin origin radius {0:F3} m leaves it off the 1.25 m booster skin",
+                        originRadius));
+            }
+            Debug.Log(string.Format(
+                "[CZ10BNetRecovery] CRAFT_GRID_FIN_ATTACHMENT_VALID name={0} count={1} maxOriginRadiusError={2:F4}",
+                Path.GetFileName(path), gridFins.Length,
+                maximumMountingError));
         }
     }
 }

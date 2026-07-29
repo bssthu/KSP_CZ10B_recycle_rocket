@@ -68,14 +68,22 @@ SET ASCENT_SPEED_LIMIT_END TO 32000. // keep the dense-air limit through the tur
 // it slowed, so keep the historical 20/20/10 kN-m response outside the bounded
 // entry-cutoff-to-2-km terminal interval.
 SET BOOSTER_FLIGHT_REACTION_WHEEL_AUTHORITY TO 0.625.
-// Run 59 proved that 10% authority could not follow the late cone-edge stop:
-// the requested 63--70 degree stage tilt remained at 50--55 degrees, leaving
-// 132 m/s at the 2 km plane.  The former 16% trial exceeded the physical
-// nozzle limit only with a 26.2 degree command.  Pair 16% with the deliberately
-// narrower 20 degree command below; this retains substantially more tracking
-// margin than that rejected combination while keeping the audited axis inside
-// the hard 30 degree cone.
-SET BOOSTER_TERMINAL_REACTION_WHEEL_AUTHORITY TO 16.0.
+// Run 59 proved that 10% authority could not follow the late cone-edge stop.
+// With the fins physically mounted, Run266 then measured a persistent
+// 6--8-degree high-altitude tracking lag even after the command cone was
+// widened, while the realised attitude and endpoint barely moved.  Run267's
+// 18% high-altitude value cut formal position error by 175.10 m, and Run268's
+// 20% value moved the signed residual another 104.18 m without approaching
+// the physical cone.  Their local secant crosses zero at about 22.74%.
+// Run269 sampled 22.7% only above 4.5 km, tapered it back to the established
+// 16% by 3 km, and still restored the 0.625% flight setting below 1.95 km.
+// Runs297--298 now leave the extreme-low entrance family about +63 m on the
+// approach side of the formal plane. The clean Runs267--269 bracket moved
+// signed formal position by about 52 m per authority percentage point.
+// Run299 therefore backs the high-altitude value off by 1.2 points, the local
+// inverse needed to remove that residual. The taper and independent
+// 30-degree physical guard remain unchanged.
+SET BOOSTER_TERMINAL_REACTION_WHEEL_AUTHORITY TO 21.5.
 SET BOOSTER_TERMINAL_REACTION_WHEEL_RESTORE_AUTHORITY TO 16.0.
 SET BOOSTER_TERMINAL_REACTION_WHEEL_TAPER_START_HEIGHT TO 4500.
 SET BOOSTER_TERMINAL_REACTION_WHEEL_TAPER_END_HEIGHT TO 3000.
@@ -171,6 +179,15 @@ SET FINAL_ALIGN_TERMINAL_PHASE_HEIGHT TO 5000.
 // mathematical horizon collapsed. Project the same boundary state only 0.20 s
 // forward; this preserves the endpoint and compensates measured response lag.
 SET FINAL_ALIGN_TERMINAL_RESPONSE_LEAD_SECONDS TO 0.20.
+// Run269 again reached 4.15 m position error from a 0.1801 entrance but
+// retained 10.91 m/s as the finite-time 1/T tail rebuilt targetward demand.
+// Run270 exposed that final align still owned a separate literal 4 while the
+// similarly named main-guidance setting changed only the upstream entrance.
+// Run271 verified the symbol but its high-energy branch added the historical
+// +0.55 on top, producing 5.00 and stopping 26.21 m short. Treat the matched
+// Run197 value as a minimum response floor: nominal/high/low family schedules
+// that already exceed it retain their independently calibrated total.
+SET FINAL_ALIGN_TERMINAL_MIN_VELOCITY_COEFFICIENT TO 4.45.
 // Run 182 exercised a 0.248 s low-family lead but retained 8.02 m/s at the
 // formal plane. Restore the common response horizon and use the remaining
 // position margin only for late velocity damping. Fade the extra coefficient
@@ -287,6 +304,11 @@ SET FINAL_ALIGN_TERMINAL_HIGH_ENERGY_VELOCITY_FULL_HEIGHT TO 3000.
 SET FINAL_ALIGN_TERMINAL_EXTREME_HIGH_POSITION_BIAS_RATIO TO 0.2295.
 SET FINAL_ALIGN_TERMINAL_EXTREME_HIGH_POSITION_BIAS_FULL_RATIO TO 0.2301.
 SET FINAL_ALIGN_TERMINAL_EXTREME_HIGH_POSITION_BIAS TO 55.0.
+// Run264 added 400 m only after the 3.85 km latch, but the saturated actuator
+// did not respond. Run265 moved a 50 m A/B here: its latch improved by 17 m,
+// yet the formal residual worsened about 25 m and reversed velocity phase.
+// Restore the protected baseline; stopping authority, not position error, is
+// the active mounted-fin boundary.
 SET FINAL_ALIGN_TERMINAL_EXTREME_HIGH_START_POSITION_BIAS TO 150.0.
 // Runs 244/254/258 all stop at nearly zero speed on the far side, but their
 // signed residual is ordered by the independently latched 4 km physical range.
@@ -298,6 +320,11 @@ SET FINAL_ALIGN_TERMINAL_EXTREME_HIGH_START_POSITION_BIAS TO 150.0.
 // 3.6 km term remains transient phase shaping and still fades before 2 km.
 SET FINAL_ALIGN_TERMINAL_HIGH_START_4KM_RANGE_REFERENCE TO 205.0.
 SET FINAL_ALIGN_TERMINAL_HIGH_START_4KM_RANGE_BIAS_GAIN TO 4.0.
+// Physically mounting the grid fins changed Runs261--263 into a new negative
+// 3.85 km range family. Run264 raised this cap by 400 m, but horizontal
+// acceleration and cone allocation were already saturated and the physical
+// endpoint changed by less than ordinary run dispersion. Restore the isolated
+// historical cap; further correction must act before the target crossing.
 SET FINAL_ALIGN_TERMINAL_HIGH_START_4KM_MAX_POSITION_BIAS TO 165.0.
 // Runs 173--176 bracketed the ownership lever. A 0.1702/s entrance starting
 // at 5.36 km still reached the centre about 700 m below the formal plane,
@@ -339,6 +366,37 @@ SET FINAL_ALIGN_TERMINAL_MAX_POSITION_GAIN TO 0.20.
 SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_LOW_RATIO TO 0.21.
 SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_FULL_RATIO TO 0.23.
 SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_MIN_HOLD_SCALE TO 0.50.
+// Run299 moved the frozen 6 km entrance to 0.1990, essentially matching
+// Run272's 0.1978 joint-pass family. Its later terminal ratio rose to 0.2437,
+// however, selecting scale 1.0 and stopping at +15 m about 500 m above the
+// formal plane before reversing. Run272 used 0.8933. Cap only the already
+// frozen <=0.200 entrance family near the Run272 actuator value; genuinely
+// higher entrances retain the existing terminal-ratio schedule and full
+// endpoint. Run303 was the first effective high-terminal observation of the
+// 0.90 cap: it passed speed at 2.25 m/s but stopped 19.75 m short. Run272
+// passed all formal gates at about 0.8933, so interpolate the cap to 0.89.
+SET FINAL_ALIGN_TERMINAL_LOW_ENTRY_HOLD_CAP_RATIO TO 0.200.
+SET FINAL_ALIGN_TERMINAL_LOW_ENTRY_HOLD_CAP TO 0.89.
+// A fixed phase hold cannot normalize the full extreme-low family. Run304's
+// 0.1727/0.1824 sample used 0.35 and stopped about 18 m short; Run305's
+// 0.1825/0.2109 sample used 0.25, crossed near 2.55 km and was 37.61 m beyond
+// centre formally. Freeze a monotone terminal-ratio schedule at the existing
+// 5 km phase latch. Low-ratio states preserve travel with about 0.32, while
+// high-ratio states spend more upper-band braking and avoid crossing before
+// the positive-range gate can retain the late 1.00 endpoint. Run306 proved
+// the monotone shape but selected 0.3468 and remained 22.37 m short. Shift
+// both endpoints down by 0.03 to preserve about 12 m more upper-band travel.
+// Run307 then sampled terminal ratio 0.1776, hit the clamped 0.29 endpoint
+// and remained 19.26 m short. Extend the measured line to 0.25 at 0.175.
+// Run309 sampled terminal ratio 0.2010 with active hold 0.3367; the new full
+// late floor passed speed at 1.44 m/s but stopped 18.29 m short. The local
+// Run307--308 slope calls for active hold about 0.309. Lower only the high
+// endpoint to 0.332, which selects that value at 0.201 while moving the
+// already-calibrated 0.179 family by less than 0.005.
+SET FINAL_ALIGN_TERMINAL_EXTREME_LOW_HOLD_SCALE TO 0.25.
+SET FINAL_ALIGN_TERMINAL_EXTREME_LOW_HIGH_HOLD_SCALE TO 0.332.
+SET FINAL_ALIGN_TERMINAL_EXTREME_LOW_HOLD_LOW_RATIO TO 0.175.
+SET FINAL_ALIGN_TERMINAL_EXTREME_LOW_HOLD_HIGH_RATIO TO 0.211.
 // Run 165's rebuilt near-1.00 tail stopped 53 m short; Run 166's strict 0.50
 // tail crossed the 2 km plane at 10.69 m/s. Retain the low upper-band release,
 // then use the measured midpoint as the denser below-end-height ceiling.
@@ -346,6 +404,24 @@ SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_MIN_TAIL_CEILING TO 0.75.
 // Run 167 proved that applying 0.75 immediately at 4 km spends the right
 // braking too early. Expose that ceiling continuously only by 2.5 km.
 SET FINAL_ALIGN_TERMINAL_AERO_BRAKE_TAIL_CEILING_FULL_HEIGHT TO 2500.
+// Run304 validates a stronger time shift only in the frozen extreme-low
+// family. Reach the unchanged 1.00 tail by 2.7 km: at about 3.5 km this still
+// commands slightly less drag than Run304, while from about 3.0 km downward
+// it commands more. Other ratio families retain the proven 2.5 km surface.
+SET FINAL_ALIGN_TERMINAL_EXTREME_LOW_TAIL_CEILING_FULL_HEIGHT TO 2700.
+// Run306 retained the correct positive position sign, but realised only
+// 0.64/0.81 drag blend near 2.95/2.77 km and missed formal speed by
+// 0.79 m/s. Add a continuous lower ownership surface only after 3 km:
+// begin at the measured 0.65 state and reach the unchanged physical maximum
+// at 2.7 km. The positive physical range/speed gates remain mandatory.
+// Run307's 0.65/3.0 km candidate remained below the naturally realised
+// surface and had no authority while formal speed missed by only 0.20 m/s.
+// Run308's 0.85/3.1 km floor restored position margin (6.94 m) but still
+// crossed 1.42 m/s fast.  Raise only this already-gated late floor to full
+// ownership; its endpoint, cone limits, and positive range/speed gates remain
+// unchanged, so this isolates braking timing from the calibrated hold scale.
+SET FINAL_ALIGN_TERMINAL_EXTREME_LOW_LATE_FLOOR_START_HEIGHT TO 3100.
+SET FINAL_ALIGN_TERMINAL_EXTREME_LOW_LATE_FLOOR_START_BLEND TO 1.00.
 // Runs 162--163 reached the same 4 km speed but crossed at 3.08--2.83 km
 // because the fixed release ramp ignored their remaining-range difference.
 // High ratio means less range for the same speed, so retain the latched endpoint
@@ -413,6 +489,81 @@ SET FINAL_ALIGN_PRECOMMIT_MAX_SPEED TO 1.0.
 // only to this reversible precommit interval; post-commit recovery keeps its
 // independently safer 1 m/s2 cap below.
 SET FINAL_ALIGN_PRECOMMIT_MAX_ACCEL TO 4.5.
+// Runs273/275/276 crossed the target with 12--20 m/s remaining because the
+// rectangular 21 m / 12 m/s precommit gate was reached only after the
+// actuator-limited stopping opportunity had passed. For the isolated mounted
+// low-entry family, admit the existing bounded settle controller on a
+// stopping-distance surface: x - v^2/(2*a_id) - margin <= 0. Run277 measured
+// only 2.42--2.88 m/s2 realised deceleration while the command cap remained
+// 4.5, so use a separate conservative plant identification in the surface.
+// Run280 then showed that 90 m / 30 m/s withheld the bounded branch until
+// 2.84 km; at 3.38 km it was already at +140.10 m / 31.58 m/s with admissible
+// attitude. Admit that measured state while still excluding the energetic
+// outer trajectory.
+// Run272's 0.1978 joint-pass family remains outside this branch.
+SET FINAL_ALIGN_PRECOMMIT_REACHABILITY_MAX_ENTRY_RATIO TO 0.195.
+// Runs293--295 independently exposed the same negative-surface state near
+// 3.6 km at 190--218 m / 38--39 m/s. Their ordinary 150/35 latches remained
+// 400--500 m late and left 8.8--10.9 m/s formally. Extend the existing
+// <=0.195 family to the already bounded Run292 envelope. The Run272 joint
+// pass at ratio 0.1978 remains outside this branch.
+SET FINAL_ALIGN_PRECOMMIT_REACHABILITY_MAX_RANGE TO 320.0.
+SET FINAL_ALIGN_PRECOMMIT_REACHABILITY_MAX_SPEED TO 42.0.
+// Run292 sampled the distinct extreme-low family at entry ratio 0.1540.
+// Its last negative stopping surface was +302.80 m / 39.73 m/s at 3694 m;
+// by the time the generic 150/35 window admitted range, the surface was
+// already 53 m positive. Runs301--302 then sampled stable retained-brake
+// topologies at 0.1655 and 0.1814 without entering the former narrow family,
+// so the intended 0.35/1.00 phase shaper had zero authority. Run302 already
+// passed position at 7.10 m but retained 10.63 m/s: exactly the state that
+// needs less upper hold and more late drag. Cover that measured topology
+// through 0.185. The shared negative stopping surface remains mandatory,
+// while Run272's protected joint-pass family at 0.1978 stays excluded.
+SET FINAL_ALIGN_PRECOMMIT_EXTREME_LOW_MAX_ENTRY_RATIO TO 0.185.
+SET FINAL_ALIGN_PRECOMMIT_EXTREME_LOW_MAX_RANGE TO 320.0.
+SET FINAL_ALIGN_PRECOMMIT_EXTREME_LOW_MAX_SPEED TO 42.0.
+SET FINAL_ALIGN_PRECOMMIT_REACHABILITY_DECEL TO 2.5.
+SET FINAL_ALIGN_PRECOMMIT_REACHABILITY_MARGIN TO 10.0.
+// Run296 proved that the 320 m entry window and the inherited 160 m release
+// edge form an empty invariant set: reachability latched at 271.77 m and
+// 243.61 m, then the following release test cleared it in the same update.
+// Put the release surface outside the entry surface with 40 m of hysteresis.
+// The controller can now retain ownership while braking, but still returns to
+// final-align guidance if a disturbance carries the stage beyond 360 m.
+SET FINAL_ALIGN_PRECOMMIT_REACHABILITY_REACQUIRE_RANGE TO 360.0.
+// Run278 latched at +77.59 m / 27.30 m/s. The ordinary 4.5 m/s2 cap then
+// realised only about 3.0 m/s2 and crossed 33.74 m beyond the target. That
+// state requires about 5.13 m/s2 to stop within 5 m, while the immediately
+// preceding outer command had already demonstrated 5.75 m/s2. Expose more
+// command only inside this isolated reachability latch; direction remains
+// bounded by the unchanged software and physical cones.
+// Run282's earlier 150 m / 35 m/s latch repaired position to 5.53 m, but its
+// 3.93 m/s2 realised spatial deceleration left 9.37 m/s horizontally at the
+// formal plane. About 4.07 m/s2 is sufficient over the same measured path.
+// Add only 6.25% command authority for this latched family; every switching
+// surface and cone barrier remains unchanged.
+SET FINAL_ALIGN_PRECOMMIT_REACHABILITY_MAX_ACCEL TO 8.5.
+// Run279 reached -1.68 m / 6.68 m/s near the formal plane while the bounded
+// controller still requested its ordinary 1 m/s targetward crawl. A
+// reachability latch already owns a stopping branch, so remove only that
+// residual reference; rectangular precommit retains the proven 1 m/s target.
+SET FINAL_ALIGN_PRECOMMIT_REACHABILITY_TARGET_SPEED TO 0.0.
+// Run283 proved that the 8.5 m/s2 cap increases realised spatial deceleration,
+// but the shared 0.60 velocity gain leaves saturation at 14.17 m/s. The last
+// two pre-formal samples therefore requested only 7.30 and 5.71 m/s2 while
+// attitude/aero lag retained 8.78 m/s formally. Hold the same tested maximum
+// to 9.44 m/s only for the isolated reachability latch. Ordinary precommit and
+// the safety-critical post-commit controller retain the shared 0.60 gain.
+SET FINAL_ALIGN_PRECOMMIT_REACHABILITY_VELOCITY_GAIN TO 0.90.
+// Run284 showed that this upstream request is subsequently owned by the
+// measured high-drag actuator: its tail ceiling reached exactly 0.75, the
+// engine still pointed targetward, and body drag supplied the net braking.
+// Raise only the isolated reachability tail through the existing 4.0--2.5 km
+// smooth blend. A 0.85 endpoint corresponds to about a 17-degree command
+// inside the unchanged 20-degree active and 30-degree physical limits, and
+// the entire allocator is disabled at/below the formal waypoint.
+SET FINAL_ALIGN_PRECOMMIT_REACHABILITY_AERO_BRAKE_TAIL_CEILING TO 0.85.
+SET FINAL_ALIGN_PRECOMMIT_EXTREME_LOW_AERO_BRAKE_TAIL_CEILING TO 1.00.
 // Run 177 committed cleanly above 2 km and held sub-metre error through 1 km,
 // but residual speed then grew to about 2.8 m/s and carried the hook 19 m out
 // at the net plane. Strengthen only pure velocity damping; the position target
@@ -438,6 +589,19 @@ SET FINAL_CAPTURE_DIRECT_CONTROL_HEIGHT TO 1500.
 SET FINAL_CAPTURE_POSITION_DEADBAND TO 2.0.
 SET FINAL_CAPTURE_POSITION_GAIN TO 0.10.
 SET FINAL_CAPTURE_MAX_SPEED TO 0.75.
+// Run304 entered a useful local capture set near 309 m at about 5.15 m error
+// and almost zero horizontal speed. Continuing position pursuit regenerated
+// velocity after centre crossings and rotated the low-speed retrograde axis.
+// Latch that controlled invariant set once: desired horizontal velocity then
+// remains zero, while bounded velocity feedback and measured-aero cancellation
+// stay active. Run308 showed that retaining -0.60*v after the latch alternated
+// the translation state through the soft attitude plant until the valid
+// 20-degree cone barrier fired.  Use a separate slow pole inside this local
+// invariant set; pre-latch pursuit remains at the proven 0.60 gain.
+SET FINAL_CAPTURE_NEAR_NET_DAMPING_HEIGHT TO 350.
+SET FINAL_CAPTURE_NEAR_NET_DAMPING_RANGE TO 8.0.
+SET FINAL_CAPTURE_NEAR_NET_DAMPING_SPEED TO 2.5.
+SET FINAL_CAPTURE_NEAR_NET_DAMPING_VELOCITY_GAIN TO 0.25.
 // The long, nearly empty stage needs a deliberately soft cooked-steering
 // torque loop near the ship.  The default loop follows sub-degree thrust-vector
 // changes too aggressively and produced measured 12.8-18 deg/s rate spikes.
@@ -450,15 +614,74 @@ SET TERMINAL_STEERING_PITCH_YAW_TS TO 8.0.
 SET TERMINAL_STEERING_ROLL_TS TO 5.0.
 SET TERMINAL_STEERING_MAX_STOPPING_TIME TO 2.0.
 SET TERMINAL_STEERING_TORQUE_FACTOR TO 1.0.
-// Run 252 stayed controlled through roughly 209--142 m, then transverse
+// Run 252 stayed controlled through roughly 300 m, then its transverse
 // attitude rate grew through 25--54 deg/s below the net. Run 254's axis
 // diagnostics independently measured 16.98 deg/s transverse rate against
-// only 0.59 deg/s axial roll, with a well-conditioned roll reference. kOS
-// defines MAXSTOPPINGTIME as the target angular-rate limit proportional to
-// available torque/inertia. Lower it only after legal commitment and before
-// the measured onset; keep the 8/5 s torque-loop settling times unchanged.
-SET FINAL_CAPTURE_NEAR_NET_STEERING_HEIGHT TO 250.
+// only 0.59 deg/s axial roll, with a well-conditioned roll reference. The
+// visually observed Run 260 loss repeated below 300 m even though that flight
+// had not passed the formal gate. This is a physical stability guard, not a
+// reward for legal commitment: arm it for every descent at 500 m, before the
+// measured growth begins. kOS defines MAXSTOPPINGTIME as the maximum target
+// rate proportional to available torque/inertia; keep the already isolated
+// 0.5 s value and the 8/5 s inner torque-loop settling times for the first
+// authoritative active sample.
+SET FINAL_CAPTURE_NEAR_NET_STEERING_HEIGHT TO 500.
 SET FINAL_CAPTURE_NEAR_NET_MAX_STOPPING_TIME TO 0.5.
+// A rate cap alone cannot distinguish command-following from a growing limit
+// cycle. Below 600 m, pass the requested thrust direction through an exact
+// angular reference governor and monitor a dimensionless attitude energy made
+// from pointing error and the filtered finite-difference rate of the
+// longitudinal body axis. That rate is invariant to roll. Physical elapsed
+// time, rather than the controller's bounded tuning step, drives slew,
+// filtering and dwell; energy growth must qualify on two consecutive samples.
+// The hard body-axis-rate path remains immediate. Either path latches a
+// fail-safe that removes horizontal pursuit and slews toward local up. The
+// current safety cone is always projected last. These thresholds sit inside
+// the independent 10 deg/s per-physics-frame T-02 audit.
+SET FINAL_CAPTURE_ATTITUDE_MONITOR_HEIGHT TO 600.
+SET FINAL_CAPTURE_ATTITUDE_TARGET_RATE_LIMIT TO 3.0.
+SET FINAL_CAPTURE_ATTITUDE_RATE_FILTER_SECONDS TO 0.20.
+SET FINAL_CAPTURE_ATTITUDE_WARNING_ERROR TO 3.0.
+SET FINAL_CAPTURE_ATTITUDE_WARNING_RATE TO 5.0.
+// Run303's one-way hard-rate latch fired at 8.027 deg/s near 209 m even
+// though the independent Unity-frame transverse observer remained below
+// 4.033 deg/s. The resulting permanent loss of horizontal pursuit rebuilt
+// error after a 0.041 m centre crossing. Reject that aliased single-sensor
+// edge at 9.5 deg/s while retaining margin inside the independent 10 deg/s
+// T-02 boundary. Run307 still produced a false 9.933 deg/s kOS sample while
+// the independent observer measured at most 4.457 deg/s and actual cone was
+// only 1.297 degrees. Cross-qualify the computed hard rate with five degrees
+// of measured cone; independent T-02 remains the immediate physical-rate stop.
+SET FINAL_CAPTURE_ATTITUDE_HARD_RATE TO 9.5.
+SET FINAL_CAPTURE_ATTITUDE_HARD_RATE_MIN_ACTUAL_CONE TO 5.0.
+SET FINAL_CAPTURE_ATTITUDE_ENERGY_ERROR_SCALE TO 4.0.
+SET FINAL_CAPTURE_ATTITUDE_ENERGY_RATE_SCALE TO 5.0.
+SET FINAL_CAPTURE_ATTITUDE_ENERGY_GROWTH_PER_SECOND TO 0.5.
+SET FINAL_CAPTURE_ATTITUDE_GROWTH_DWELL_SECONDS TO 0.20.
+// Run306's computed energy path latched at 7.931 deg/s while the independent
+// transverse observer measured at most 3.628 deg/s and actual cone was only
+// 6.39 degrees. Require a second physical indicator before noisy energy alone
+// can disable the verified near-net damper. Ten degrees leaves another ten
+// degrees before the immediate cone barrier and twenty before T-01.
+SET FINAL_CAPTURE_ATTITUDE_ENERGY_MIN_ACTUAL_CONE TO 10.0.
+SET FINAL_CAPTURE_ATTITUDE_SAFE_MAX_STOPPING_TIME TO 0.20.
+// Rate/energy detects a dynamic instability, but Run274 crossed the physical
+// cone with only 1.82 deg/s filtered transverse rate because the low-speed
+// surface-retrograde axis itself rotated. Treat 20 degrees as a control
+// barrier: it leaves 10 degrees of plant/cadence margin and matches the
+// existing actual-cone command guard's first intervention surface.
+SET FINAL_CAPTURE_ATTITUDE_SAFE_CONE_BARRIER_DEGREES TO 20.0.
+// Once the one-way safe latch has removed horizontal pursuit, keep local up
+// inside a controlled invariant recovery set instead of projecting it back
+// into the normal 8-degree cone around a rapidly rotating surface-retrograde
+// axis. 18 degrees still leaves 12 degrees inside the independent physical
+// 30-degree powered-flight boundary.
+// Run294 proved that widening the normal 8-degree set to 18 degrees after a
+// barrier crossing drives the moving low-speed cone in the wrong direction:
+// command rose to 18 while actual cone rose from 20.78 to 39.37 degrees.
+// Safe mode must be a subset of normal mode, leaving dynamic tracking margin
+// inside the immutable 30-degree physical boundary.
+SET FINAL_CAPTURE_ATTITUDE_SAFE_COMMAND_CONE_DEGREES TO 8.0.
 // The high-dynamic-pressure waypoint handoff needs a short, forceful turn.
 // These values are restored to the soft profile above before final capture.
 SET TERMINAL_COAST_STEERING_PITCH_YAW_TS TO 0.5.
@@ -558,9 +781,11 @@ SET TERMINAL_WAYPOINT_HEIGHT TO 2000.
 // horizontal gates by wide margins, but reached 200.47 m/s descent. Moving the
 // endpoint from 174 to 173 produced Run 229's 199.74 m/s pass. Run 237's newly
 // validated 2 m/s2 horizontal settle again passed every horizontal gate but
-// reached 200.72 m/s. Move the same consistent endpoint one final metre
-// slower; 22 m/s nominal margin remains above the lower gate.
-SET TERMINAL_WAYPOINT_VERTICAL_SPEED TO 172.
+// reached 200.72 m/s. Moving the endpoint to 172 produced broad improvements,
+// but Run309 landed exactly on the upper edge at 200.01 m/s. Remove one more
+// metre per second of independent vertical reference; about 21 m/s nominal
+// margin remains above the lower gate.
+SET TERMINAL_WAYPOINT_VERTICAL_SPEED TO 171.
 SET TERMINAL_WAYPOINT_MIN_VERTICAL_SPEED TO 150.
 SET TERMINAL_WAYPOINT_MAX_VERTICAL_SPEED TO 200.
 SET TERMINAL_WAYPOINT_MAX_HORIZONTAL_SPEED TO 5.
@@ -604,8 +829,8 @@ SET TERMINAL_HORIZONTAL_FOOTPRINT_LAG_SECONDS TO 0.35.
 SET TERMINAL_HORIZONTAL_LEAD_SECONDS TO 0.
 // Run 90's joint-state audit showed that the retuned 10/5.7 law becomes
 // prograde below roughly 8 km while the physical stopping boundary is already
-// infeasible.  Restore the exact finite-time cubic endpoint coefficients from
-// the equation documented in main.ks: a = 6*x/T^2 - 4*v/T.
+// infeasible.  Preserve the exact upstream finite-time cubic coefficients.
+// Final align owns its separately identified response coefficient above.
 SET TERMINAL_WAYPOINT_POSITION_COEFFICIENT TO 6.0.
 SET TERMINAL_WAYPOINT_VELOCITY_COEFFICIENT TO 4.0.
 // The long stage can follow the point-of-ignition downrange axis much faster
@@ -931,6 +1156,12 @@ SET TERMINAL_LOW_ALT_COMMAND_CONE_DEGREES TO 8.
 // near-field authority and the unchanged 30 degree physical hard limit.
 SET TERMINAL_DENSE_AIR_CONE_START_HEIGHT TO 8000.
 SET TERMINAL_DENSE_AIR_CONE_END_HEIGHT TO 4000.
+// Runs261--265 with physically mounted fins retain 16--18 m/s formal descent
+// margin but cross the target before the late position controller can act.
+// Run266 raised this 8--4 km floor to 12 degrees, moving the request by as much
+// as three degrees while the body moved only about 0--0.5 degrees and the
+// endpoint did not improve.  Restore the proven 8-degree floor; Run267 changes
+// only high-altitude attitude authority.
 SET TERMINAL_DENSE_AIR_COMMAND_CONE_DEGREES TO 8.
 // Run 109 first enters the legal vertical-speed window, but the final along
 // state becomes unreachable: at 4.0 km the plant realises only 9.8 m/s2 while
