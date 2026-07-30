@@ -12,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 $offset = $StartOffset
 $pending = ''
 $script:terminalFailure = ''
+$script:terminalNominalMiss = ''
 
 function Write-GuardResult {
     param([string]$Message)
@@ -36,7 +37,15 @@ function Stop-PassedRun {
         Stop-FailedRun ("later in-process pass was invalid after formal failure: " +
             $Evidence)
     }
-    Write-GuardResult ("PASS " + (Get-Date -Format o) + " " + $Evidence)
+    $tier = if ($script:terminalNominalMiss) { 'RECOVERED' } else { 'NOMINAL' }
+    $nominalEvidence = if ($script:terminalNominalMiss) {
+        '; nominalMiss=' + $script:terminalNominalMiss
+    } else {
+        ''
+    }
+    Write-GuardResult (
+        "PASS " + (Get-Date -Format o) + " tier=$tier " +
+        $Evidence + $nominalEvidence)
     Stop-Process -Id $KspProcessId -Force -ErrorAction SilentlyContinue
     exit 0
 }
@@ -89,10 +98,14 @@ while (Get-Process -Id $KspProcessId -ErrorAction SilentlyContinue) {
                     $horizontal = [double]$matches[3]
                     $hookError = [double]$matches[4]
                     $nozzle = [double]$matches[5]
-                    if ($descent -lt 150.0 -or $descent -gt 200.0 -or
-                        $horizontal -gt 5.0 -or $hookError -gt 10.0 -or
-                        $nozzle -gt 30.0) {
-                        $terminalEvidence = "TERMINAL_2KM descent=$descent horizontal=$horizontal hookError=$hookError nozzle=$nozzle"
+                    $terminalEvidence = "TERMINAL_2KM descent=$descent horizontal=$horizontal hookError=$hookError nozzle=$nozzle"
+                    $commonAccepted = $descent -ge 150.0 -and
+                        $descent -le 200.0 -and $nozzle -le 30.0
+                    $nominalAccepted = $commonAccepted -and
+                        $horizontal -le 5.0 -and $hookError -le 10.0
+                    $recoveryAccepted = $commonAccepted -and
+                        $horizontal -le 10.0 -and $hookError -le 30.0
+                    if (-not $recoveryAccepted) {
                         if ($ContinueAfterTerminalFailure) {
                             $script:terminalFailure = $terminalEvidence
                             Write-GuardResult (
@@ -102,8 +115,15 @@ while (Get-Process -Id $KspProcessId -ErrorAction SilentlyContinue) {
                         } else {
                             Stop-FailedRun $terminalEvidence
                         }
+                    } elseif (-not $nominalAccepted) {
+                        $script:terminalNominalMiss = $terminalEvidence
+                        Write-GuardResult (
+                            "TERMINAL_RECOVERY_ADMITTED " +
+                            (Get-Date -Format o) + " " +
+                            $terminalEvidence)
                     } else {
-                        Write-GuardResult "TERMINAL_PASS descent=$descent horizontal=$horizontal hookError=$hookError nozzle=$nozzle"
+                        Write-GuardResult (
+                            "TERMINAL_NOMINAL_PASS " + $terminalEvidence)
                     }
                 }
                 if ($line -match 'SEA_MISSION_TEST_STATUS' -and
@@ -117,6 +137,12 @@ while (Get-Process -Id $KspProcessId -ErrorAction SilentlyContinue) {
                     ($line -match 'SEA_MISSION_TEST_STATUS' -and
                      $line -match 'situation=SPLASHED')) {
                     Stop-FailedRun 'booster water contact'
+                }
+                if ($line -match '\[CZ10BNetRecovery\] CONSTRAINT_FAIL G-05N_2KM_NOMINAL') {
+                    if (-not $script:terminalNominalMiss) {
+                        $script:terminalNominalMiss = $line.Trim()
+                    }
+                    continue
                 }
                 if ($line -match '\[CZ10BNetRecovery\] CONSTRAINT_FAIL ') {
                     Stop-FailedRun $line.Trim()

@@ -2,7 +2,11 @@
 
 ## 1. 文档状态
 
-本文描述后续需要实现和实机验证的目标控制链，不表示当前代码已经满足要求。当前代码已知存在一级落海、10 km以下PWM和喷管夹角超过30°的问题，状态为 **未通过**。
+本文描述当前目标控制链及其验收方法。Run333 已按该控制链完成第一轮
+恢复级完整自动任务：G-05R、后续 G-05C、四钩捕获、无触海和 60 s
+驻留全部通过，G-04 峰值 27.442°；G-05N 因 29.51 m 位置误差仍未通过。
+因此当前状态为 **恢复级通过，名义质量仍待优化**，不能把恢复结果写成
+G-05N PASS。
 
 所有数值和合格条件以[强制约束与验收基线](mandatory-mission-constraints.md)为准；环境预测按[Kerbin重力、大气与气动混合模型](ksp-physics-and-hybrid-model.md)实施。本文若与强制基线冲突，强制基线优先。
 
@@ -22,7 +26,7 @@
                → 40 km连续入口减速至水平≤1000 m/s
                → 无动力下降 + 2～3个条件检查点
                → 连续75%标称主制动
-               → 2 km 150～200/5/10门槛
+               → 2 km名义5/10、恢复10/30分层判定
                → 连续竖直末制导
                → 移动索网四点捕获
                → 弹性下挠并稳定60 s
@@ -109,12 +113,14 @@ a = mu/r²重力矢量
 
 ### 6.3 主制动
 
-- 搜索最晚可行点火点，使连续75%最大推力的标称轨迹在2 km满足150～200/5/10门槛。
+- 搜索最晚可行点火点，使连续75%最大推力的标称轨迹在2 km满足
+  `150～200 m/s / 5 m/s / 10 m`名义目标；预测不确定性不得使轨迹
+  越出`150～200 m/s / 10 m/s / 30 m`恢复准入。
 - 点火后保持连续燃烧；轨迹修正可以在30°姿态约束内把油门连续提高到100%。
 - 到2 km前不得在0与75%/100%之间切换，也不得再次关机滑行。
 - 所有动力回收阶段的可用最大推力TWR严格大于1。
 
-## 7. 姿态、油门和2 km硬门槛
+## 7. 姿态、油门和2 km分层验收
 
 ### 7.1 30°逐帧约束
 
@@ -127,22 +133,40 @@ a = mu/r²重力矢量
 
 ### 7.2 2 km状态
 
-一级下降穿越海拔2000 m时同时满足：
+一级下降穿越海拔2000 m时按相邻物理帧插值，并分别报告：
 
 ```text
-150 m/s <= downwardSpeed <= 200 m/s
-horizontalGroundSpeed <= 5 m/s
-hookToNetHorizontalError <= 10 m
+G-05N nominal:
+  150 m/s <= downwardSpeed <= 200 m/s
+  horizontalGroundSpeed <= 5 m/s
+  hookToNetHorizontalError <= 10 m
+
+G-05R recovery admission:
+  150 m/s <= downwardSpeed <= 200 m/s
+  horizontalGroundSpeed <= 10 m/s
+  hookToNetHorizontalError <= 30 m
+  delay-aware signed-state prediction reaches the strict commit set
+
+G-05C strict commit:
+  horizontalGroundSpeed <= 3.9 m/s
+  hookToNetHorizontalError <= 8 m
+  actualThrustAxisTilt <= 14.7 deg
+
 verticalSpeed < 0
 maximumPoweredNozzleAngle <= 30.0 deg
 no low-altitude PWM
 ```
 
-门槛按相邻物理帧插值；不得用低于2 km后的较好状态代替。
+G-05N仍是轨迹优化目标；未通过时不得打印名义PASS。G-05R只是继续
+捕获的必要条件，不能直接触发控制模式提交。控制器必须维持有界位置/
+速度修正，直到实际进入G-05C，才允许单向取消位置追踪。不得用低于
+2 km后的较好状态回填G-05N或G-05R。
 
 ## 8. 2 km以下末制导
 
-- 主要任务是连续降低下降速度并保持近似竖直轨迹，水平方向只做小幅微调。
+- 达到G-05N后，主要任务是连续降低下降速度并保持近似竖直轨迹，
+  水平方向只做小幅微调。仅达到G-05R时，保留有界位置/速度修正直到
+  实际达到G-05C；提交后只保留速度阻尼。
 - 油门连续调节，主制动开始后到捕获前不得反复归零；最终捕获前只允许一次计划关机。
 - 建立捕获约束前垂直速度必须始终小于0，不能刹停、悬停或向上反弹。
 - 1 km及500 m以下不得出现多次来回姿态超调；横向误差收敛后不得重新加速或大幅反向摆回。

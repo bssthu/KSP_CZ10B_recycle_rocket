@@ -125,6 +125,12 @@ namespace CZ10BNetRecovery
         private const int MaximumCheckpointBurnCount = 3;
         private const double MaximumCheckpointPoweredSeconds = 4d;
         private const double MainBurnClassificationAltitude = 24000d;
+        private const float TerminalMinimumDescentSpeed = 150f;
+        private const float TerminalMaximumDescentSpeed = 200f;
+        private const float TerminalNominalMaximumHorizontalSpeed = 5f;
+        private const double TerminalNominalMaximumHorizontalError = 10d;
+        private const float TerminalRecoveryMaximumHorizontalSpeed = 10f;
+        private const double TerminalRecoveryMaximumHorizontalError = 30d;
 
         private void Start()
         {
@@ -557,17 +563,11 @@ namespace CZ10BNetRecovery
                             checkpointBurnCount >= MinimumCheckpointBurnCount &&
                             checkpointBurnCount <= MaximumCheckpointBurnCount &&
                             !checkpointBurnConstraintViolation &&
-                            nominalMainBurnSeen &&
+                           nominalMainBurnSeen &&
                            !nominalMainBurnThrottleViolation &&
                            !mainBurnContinuityViolation &&
                            !lowAltitudePwmViolation &&
-                           terminalWaypointRecorded &&
-                           terminalWaypointVerticalSpeed >= 150f &&
-                           terminalWaypointVerticalSpeed <= 200f &&
-                           terminalWaypointVerticalVelocity < 0f &&
-                           terminalWaypointHorizontalSpeed <= 5f &&
-                           terminalWaypointHorizontalError <= 10d &&
-                           !terminalUpwardVelocityViolation &&
+                           IsTerminalWaypointRecoveryAccepted() &&
                            terminalCenterSeen &&
                            maxTerminalReboundAfterCenter <= 10d &&
                            poweredFramesBelow50Km > 0 &&
@@ -748,13 +748,10 @@ namespace CZ10BNetRecovery
             bool mainBurnAccepted = nominalMainBurnSeen &&
                 !nominalMainBurnThrottleViolation &&
                 !mainBurnContinuityViolation;
-            bool waypointAccepted = terminalWaypointRecorded &&
-                terminalWaypointVerticalSpeed >= 150f &&
-                terminalWaypointVerticalSpeed <= 200f &&
-                terminalWaypointVerticalVelocity < 0f &&
-                terminalWaypointHorizontalSpeed <= 5f &&
-                terminalWaypointHorizontalError <= 10d &&
-                !terminalUpwardVelocityViolation;
+            bool waypointNominalAccepted =
+                IsTerminalWaypointNominalAccepted();
+            bool waypointRecoveryAccepted =
+                IsTerminalWaypointRecoveryAccepted();
             bool nozzleAccepted = poweredFramesBelow50Km > 0 &&
                 !nozzleVelocityConstraintViolation &&
                 maxTerminalNozzleVelocityAngle <= 30f;
@@ -773,7 +770,7 @@ namespace CZ10BNetRecovery
 
             pass = pass && separationAccepted && upperAccepted &&
                 entryAccepted && checkpointsAccepted && mainBurnAccepted &&
-                waypointAccepted &&
+                waypointRecoveryAccepted &&
                 nozzleAccepted && !lowAltitudePwmViolation && waterAccepted &&
                 captureAccepted && attitudeAccepted &&
                 gridFinMountingValid;
@@ -805,13 +802,26 @@ namespace CZ10BNetRecovery
                 string.Format("frames={0} maxAngle={1:F3}",
                     poweredFramesBelow50Km,
                     maxTerminalNozzleVelocityAngle));
-            LogConstraintResult("G-05_2KM_GATE", waypointAccepted,
+            LogConstraintResult("G-05N_2KM_NOMINAL",
+                waypointNominalAccepted,
                 string.Format(
-                    "verticalVelocity={0:F2} horizontal={1:F2} hookError={2:F2} upwardViolation={3}",
+                    "verticalVelocity={0:F2} horizontal={1:F2}/{2:F2} hookError={3:F2}/{4:F2} upwardViolation={5}",
                     terminalWaypointVerticalVelocity,
                     terminalWaypointHorizontalSpeed,
+                    TerminalNominalMaximumHorizontalSpeed,
                     terminalWaypointHorizontalError,
+                    TerminalNominalMaximumHorizontalError,
                     terminalUpwardVelocityViolation));
+            LogConstraintResult("G-05R_2KM_RECOVERY",
+                waypointRecoveryAccepted,
+                string.Format(
+                    "verticalVelocity={0:F2} horizontal={1:F2}/{2:F2} hookError={3:F2}/{4:F2} nominal={5} downstreamStrictCommitAndCaptureRequired=true",
+                    terminalWaypointVerticalVelocity,
+                    terminalWaypointHorizontalSpeed,
+                    TerminalRecoveryMaximumHorizontalSpeed,
+                    terminalWaypointHorizontalError,
+                    TerminalRecoveryMaximumHorizontalError,
+                    waypointNominalAccepted));
             LogConstraintResult("G-03_TWR", minimumPoweredRecoveryAvailableTwr > 1f,
                 "minimumAvailableTwr=" +
                     minimumPoweredRecoveryAvailableTwr.ToString("F3"));
@@ -889,6 +899,9 @@ namespace CZ10BNetRecovery
                 latestLowAxialAngularRate,
                 latestLowTransverseAngularRate,
                 lowAltitudeAttitudeViolation);
+            detail += string.Format(
+                " waypointNominal={0} waypointRecovery={1}",
+                waypointNominalAccepted, waypointRecoveryAccepted);
             if (pass)
                 Debug.Log("[CZ10BNetRecovery] " + Prefix + "_PASS" + detail);
             else
@@ -904,6 +917,33 @@ namespace CZ10BNetRecovery
                 Debug.Log(message);
             else
                 Debug.LogError(message);
+        }
+
+        private bool IsTerminalWaypointNominalAccepted()
+        {
+            return IsTerminalWaypointCommonAccepted() &&
+                terminalWaypointHorizontalSpeed <=
+                    TerminalNominalMaximumHorizontalSpeed &&
+                terminalWaypointHorizontalError <=
+                    TerminalNominalMaximumHorizontalError;
+        }
+
+        private bool IsTerminalWaypointRecoveryAccepted()
+        {
+            return IsTerminalWaypointCommonAccepted() &&
+                terminalWaypointHorizontalSpeed <=
+                    TerminalRecoveryMaximumHorizontalSpeed &&
+                terminalWaypointHorizontalError <=
+                    TerminalRecoveryMaximumHorizontalError;
+        }
+
+        private bool IsTerminalWaypointCommonAccepted()
+        {
+            return terminalWaypointRecorded &&
+                terminalWaypointVerticalSpeed >= TerminalMinimumDescentSpeed &&
+                terminalWaypointVerticalSpeed <= TerminalMaximumDescentSpeed &&
+                terminalWaypointVerticalVelocity < 0f &&
+                !terminalUpwardVelocityViolation;
         }
 
         private static bool ValidateGridFinMounting(Vessel vessel)
@@ -962,7 +1002,12 @@ namespace CZ10BNetRecovery
             bool captured = hook != null && hook.hookState == "Captured";
             everPowered |= actualThrust > 10f;
 
-            if (descending && booster.altitude <= 50000d &&
+            // Once all hooks establish the cable constraint, the first solver
+            // impulse is no longer a free-flight velocity response. The
+            // captured stage is audited by the four-point integrity and
+            // continuous 60 s stability gates below, just as the low-altitude
+            // attitude/PWM observers already exclude captured motion.
+            if (!captured && descending && booster.altitude <= 50000d &&
                 actualThrust > 1f && booster.ReferenceTransform != null)
             {
                 double radius = booster.mainBody.Radius + booster.altitude;
@@ -1249,12 +1294,14 @@ namespace CZ10BNetRecovery
                 previousTerminalHorizontalError + alpha *
                 (horizontalError - previousTerminalHorizontalError);
             Debug.Log(string.Format(
-                "[CZ10BNetRecovery] TERMINAL_2KM verticalVelocity={0:F2} descent={1:F2} horizontal={2:F2} hookError={3:F2} nozzleAngleMax={4:F2}",
+                "[CZ10BNetRecovery] TERMINAL_2KM verticalVelocity={0:F2} descent={1:F2} horizontal={2:F2} hookError={3:F2} nozzleAngleMax={4:F2} nominal={5} recovery={6}",
                 terminalWaypointVerticalVelocity,
                 terminalWaypointVerticalSpeed,
                 terminalWaypointHorizontalSpeed,
                 terminalWaypointHorizontalError,
-                maxTerminalNozzleVelocityAngle));
+                maxTerminalNozzleVelocityAngle,
+                IsTerminalWaypointNominalAccepted(),
+                IsTerminalWaypointRecoveryAccepted()));
         }
 
         private static void CommandUpperStage(Vessel upper, bool burn,

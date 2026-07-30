@@ -1260,6 +1260,8 @@ LOCAL FINAL_ALIGN_TERMINAL_MIDDLE_PROJECTED_RANGE_AT_LATCH IS -1.
 LOCAL FINAL_DESCENT_ARMED IS FALSE.
 LOCAL FINAL_ALIGN_PRECOMMIT_SETTLE IS FALSE.
 LOCAL FINAL_ALIGN_PRECOMMIT_REACHABILITY_LATCHED IS FALSE.
+LOCAL FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREPOSITION_LATCHED IS FALSE.
+LOCAL FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LATCHED IS FALSE.
 LOCAL FINAL_CAPTURE_DIRECT_AERO_RESET IS FALSE.
 LOCAL FINAL_CAPTURE_NEAR_NET_DAMPING_LATCHED IS FALSE.
 LOCAL FINAL_CAPTURE_NEAR_NET_STEERING_TUNED IS FALSE.
@@ -1274,6 +1276,8 @@ LOCAL FINAL_CAPTURE_ATTITUDE_GROWTH_DWELL IS 0.
 LOCAL FINAL_CAPTURE_ATTITUDE_GROWTH_SAMPLE_COUNT IS 0.
 LOCAL FINAL_CAPTURE_ATTITUDE_WARNING_LOGGED IS FALSE.
 LOCAL FINAL_CAPTURE_ATTITUDE_SAFE_MODE IS FALSE.
+LOCAL FINAL_CAPTURE_VELOCITY_AXIS_FILTERED_SPEED_GROWTH IS 0.
+LOCAL FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_PREVIOUS_ACTIVE IS FALSE.
 LOCAL TERMINAL_STEERING_TUNED IS FALSE.
 LOCAL FILTERED_H_ACCEL IS V(0,0,0).
 LOCAL LIVE_APPROACH_OFFSET_FINAL_BLEND_STATE IS
@@ -2494,9 +2498,33 @@ UNTIL HOOK_CAPTURED() {
         HORIZONTAL_POS, CONTROL_ALONG_DIRECTION).
     LOCAL FINAL_ALIGN_PRECOMMIT_ALONG_CLOSING_SPEED IS MAX(
         VDOT(HORIZONTAL_VEL, CONTROL_ALONG_DIRECTION), 0).
+    LOCAL FINAL_ALIGN_PRECOMMIT_REALIZED_DECEL IS MAX(-VDOT(
+        POWERED_MEASURED_ACCEL, CONTROL_ALONG_DIRECTION), 0).
+    LOCAL FINAL_ALIGN_PRECOMMIT_DECEL_SCALE IS
+        TERMINAL_FORMAL_PLANE_GOVERNOR_MIN_DECEL_SCALE
+        + (1 - TERMINAL_FORMAL_PLANE_GOVERNOR_MIN_DECEL_SCALE)
+            * CLAMP(
+                (TERMINAL_FORMAL_PLANE_GOVERNOR_START_HEIGHT
+                    - HOOK_HEIGHT)
+                / MAX(
+                    TERMINAL_FORMAL_PLANE_GOVERNOR_START_HEIGHT
+                        - TERMINAL_FORMAL_PLANE_GOVERNOR_FULL_SCALE_HEIGHT,
+                    1),
+                0, 1).
+    // The original fixed 2.5 m/s2 value is retained as a conservative floor.
+    // Run311 measured more than twice that braking and therefore entered the
+    // maximum-brake settle mode from a state that was actually 71 m inside the
+    // live stopping surface.  Use the horizon-scaled measured plant above the
+    // floor so the outer settle latch and actuator governor share one model.
+    LOCAL FINAL_ALIGN_PRECOMMIT_ACTIVE_REACHABILITY_DECEL IS MAX(
+        FINAL_ALIGN_PRECOMMIT_REACHABILITY_DECEL,
+        FINAL_ALIGN_PRECOMMIT_REALIZED_DECEL
+            * FINAL_ALIGN_PRECOMMIT_DECEL_SCALE).
     LOCAL FINAL_ALIGN_PRECOMMIT_STOPPING_DISTANCE IS
         FINAL_ALIGN_PRECOMMIT_ALONG_CLOSING_SPEED^2
-        / MAX(2 * FINAL_ALIGN_PRECOMMIT_REACHABILITY_DECEL, 0.1).
+        / MAX(
+            2 * FINAL_ALIGN_PRECOMMIT_ACTIVE_REACHABILITY_DECEL,
+            0.1).
     LOCAL FINAL_ALIGN_PRECOMMIT_STOPPING_SURFACE IS
         FINAL_ALIGN_PRECOMMIT_ALONG_RANGE
         - FINAL_ALIGN_PRECOMMIT_STOPPING_DISTANCE
@@ -2560,6 +2588,13 @@ UNTIL HOOK_CAPTURED() {
             + ",tilt=" + ROUND(STAGE_TILT,3)
             + ",reachabilityMaxAccel="
                 + FINAL_ALIGN_PRECOMMIT_REACHABILITY_MAX_ACCEL
+            + ",reachabilityDecel="
+                + ROUND(
+                    FINAL_ALIGN_PRECOMMIT_ACTIVE_REACHABILITY_DECEL,3)
+            + ",reachabilityRealizedDecel="
+                + ROUND(FINAL_ALIGN_PRECOMMIT_REALIZED_DECEL,3)
+            + ",reachabilityDecelScale="
+                + ROUND(FINAL_ALIGN_PRECOMMIT_DECEL_SCALE,3)
             TO "0:/cz10b/telemetry.csv".
     }
     LOCAL FINAL_ALIGN_PRECOMMIT_ACTIVE_REACQUIRE_RANGE IS
@@ -2583,9 +2618,24 @@ UNTIL HOOK_CAPTURED() {
     }
     LOCAL FINAL_ALIGN_PRECOMMIT_ACTIVE_TARGET_SPEED IS
         FINAL_ALIGN_PRECOMMIT_MAX_SPEED.
+    LOCAL FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_SPEED IS 0.
     IF FINAL_ALIGN_PRECOMMIT_REACHABILITY_LATCHED {
+        // Arm early from the conservative live surface, then regulate along a
+        // spatial stopping curve instead of commanding zero velocity forever.
+        // This preserves one-way ownership without turning the latch into a
+        // maximum-brake bang-bang switch.
+        SET FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_SPEED TO MAX(
+            FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_TARGET_SPEED,
+            SQRT(
+                FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_TARGET_SPEED^2
+                + 2 * FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_DECEL
+                    * MAX(FINAL_ALIGN_PRECOMMIT_ALONG_RANGE
+                        - FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_TARGET_RANGE,
+                        0))
+            - FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_DECEL
+                * FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_LEAD_SECONDS).
         SET FINAL_ALIGN_PRECOMMIT_ACTIVE_TARGET_SPEED TO
-            FINAL_ALIGN_PRECOMMIT_REACHABILITY_TARGET_SPEED.
+            FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_SPEED.
     }
     LOCAL FINAL_ALIGN_PRECOMMIT_ACTIVE_VELOCITY_GAIN IS
         FINAL_CAPTURE_VELOCITY_GAIN.
@@ -2593,9 +2643,53 @@ UNTIL HOOK_CAPTURED() {
         SET FINAL_ALIGN_PRECOMMIT_ACTIVE_VELOCITY_GAIN TO
             FINAL_ALIGN_PRECOMMIT_REACHABILITY_VELOCITY_GAIN.
     }
+    // The derivative of the spatial reference is -a only on its approach
+    // branch. At and inside the 5 m endpoint the reference is constant at
+    // 3 m/s, so continuing -a is mathematically wrong; after a centre crossing
+    // its vector sign also pushes the miss farther away. Keep both nominal
+    // derivative feedforward and its measured-deficit correction inside the
+    // signed, closing approach domain.
+    LOCAL FINAL_ALIGN_PRECOMMIT_SPATIAL_DERIVATIVE_ACTIVE IS
+        FINAL_ALIGN_PRECOMMIT_REACHABILITY_LATCHED
+        AND FINAL_ALIGN_PRECOMMIT_ALONG_RANGE
+            > FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_TARGET_RANGE
+        AND FINAL_ALIGN_PRECOMMIT_ALONG_CLOSING_SPEED > 0.
+    // The scalar envelope alone does not describe whether the shared
+    // attitude/aerodynamic actuator has already produced its requested
+    // derivative. Run323 also proved that the former 0.25-gain actuator
+    // envelope contradicted the 0.90-gain outer request. Construct the exact
+    // bounded outer virtual control once, then reuse it here and downstream.
+    // This is bounded disturbance compensation, not additional authority.
+    LOCAL FINAL_ALIGN_PRECOMMIT_ENVELOPE_DESIRED_DECEL IS 0.
+    LOCAL FINAL_ALIGN_PRECOMMIT_EFFECTIVE_REALIZED_DECEL IS
+        FINAL_ALIGN_PRECOMMIT_REALIZED_DECEL
+            * FINAL_ALIGN_PRECOMMIT_DECEL_SCALE.
+    LOCAL FINAL_ALIGN_PRECOMMIT_ACTUATOR_DEFICIT_COMPENSATION IS 0.
+    IF FINAL_ALIGN_PRECOMMIT_SPATIAL_DERIVATIVE_ACTIVE {
+        SET FINAL_ALIGN_PRECOMMIT_ENVELOPE_DESIRED_DECEL TO CLAMP(
+            FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_DECEL
+            + (FINAL_ALIGN_PRECOMMIT_ALONG_CLOSING_SPEED
+                - FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_SPEED)
+                * FINAL_ALIGN_PRECOMMIT_ACTIVE_VELOCITY_GAIN,
+            0,
+            FINAL_ALIGN_PRECOMMIT_ACTIVE_MAX_ACCEL).
+        SET FINAL_ALIGN_PRECOMMIT_ACTUATOR_DEFICIT_COMPENSATION TO CLAMP(
+            FINAL_ALIGN_PRECOMMIT_ENVELOPE_DESIRED_DECEL
+                - FINAL_ALIGN_PRECOMMIT_EFFECTIVE_REALIZED_DECEL,
+            0,
+            FINAL_ALIGN_PRECOMMIT_REACHABILITY_ACTUATOR_DEFICIT_MAX_ACCEL).
+    }
     IF FINAL_ALIGN_PRECOMMIT_SETTLE AND NOT FINAL_DESCENT_ARMED {
         LOCAL PRECOMMIT_DESIRED_H_VEL IS V(0,0,0).
-        IF FINAL_ALIGN_PRECOMMIT_ACTIVE_TARGET_SPEED > 0
+        IF FINAL_ALIGN_PRECOMMIT_REACHABILITY_LATCHED
+            AND HORIZONTAL_POS:MAG > FINAL_CAPTURE_POSITION_DEADBAND {
+            // Do not pass the stopping-speed reference through the ordinary
+            // 0.10*range pursuit cap; that cap is for local positioning and
+            // would collapse the 40--50 m/s braking envelope back into the
+            // same near-zero target that Run316 falsified.
+            SET PRECOMMIT_DESIRED_H_VEL TO HORIZONTAL_POS:NORMALIZED
+                * FINAL_ALIGN_PRECOMMIT_ACTIVE_TARGET_SPEED.
+        } ELSE IF FINAL_ALIGN_PRECOMMIT_ACTIVE_TARGET_SPEED > 0
             AND HORIZONTAL_POS:MAG > FINAL_CAPTURE_POSITION_DEADBAND {
             SET PRECOMMIT_DESIRED_H_VEL TO HORIZONTAL_POS:NORMALIZED
                 * MIN(FINAL_ALIGN_PRECOMMIT_ACTIVE_TARGET_SPEED,
@@ -2603,8 +2697,20 @@ UNTIL HOOK_CAPTURED() {
                         - FINAL_CAPTURE_POSITION_DEADBAND)
                         * FINAL_CAPTURE_POSITION_GAIN).
         }
+        LOCAL FINAL_ALIGN_PRECOMMIT_FEEDFORWARD_H_ACCEL IS V(0,0,0).
+        IF FINAL_ALIGN_PRECOMMIT_SPATIAL_DERIVATIVE_ACTIVE {
+            // For v_ref^2 = v_terminal^2 + 2*a*range, following the
+            // closing trajectory gives dv_ref/dt = -a. Run317's proportional
+            // loop omitted this nominal input, so its speed error grew from
+            // 0.8 to 18.7 m/s before the formal plane.
+            SET FINAL_ALIGN_PRECOMMIT_FEEDFORWARD_H_ACCEL TO
+                -HORIZONTAL_POS:NORMALIZED
+                    * (FINAL_ALIGN_PRECOMMIT_REACHABILITY_REFERENCE_DECEL
+                        + FINAL_ALIGN_PRECOMMIT_ACTUATOR_DEFICIT_COMPENSATION).
+        }
         SET H_ACCEL TO CLAMPV(
-            (PRECOMMIT_DESIRED_H_VEL - HORIZONTAL_VEL)
+            FINAL_ALIGN_PRECOMMIT_FEEDFORWARD_H_ACCEL
+            + (PRECOMMIT_DESIRED_H_VEL - HORIZONTAL_VEL)
                 * FINAL_ALIGN_PRECOMMIT_ACTIVE_VELOCITY_GAIN,
             FINAL_ALIGN_PRECOMMIT_ACTIVE_MAX_ACCEL).
     }
@@ -2622,6 +2728,151 @@ UNTIL HOOK_CAPTURED() {
         SET FINAL_DESCENT_ARMED TO TRUE.
         SET FILTERED_H_ACCEL TO V(0,0,0).
         PRINT "VERTICAL CAPTURE COMMITTED" AT(0,11).
+    }
+
+    // Run325 entered G-05R at 2.46 m/s / 10.14 m, but the high-drag body
+    // state still supplied about 6 m/s2 deceleration and reversed the stage
+    // away from the net before position pursuit could close the last 2 m.
+    // Run326 proved the one-way unload can repair that state into G-05C, but
+    // its fixed 7 m/s edge left only 1.06 s to zero while the body/force state
+    // needed 2.5--3.0 s to unload. Use that measured time-to-zero surface
+    // inside the local recovery corridor. Unlike strict low-speed settle, this
+    // retains position pursuit; it only breaks the self-locking
+    // aero-cancellation/high-drag attitude loop.
+    LOCAL FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_STOP_TIME IS -1.
+    // Predict the two switching coordinates jointly at the next calibrated
+    // controller sample. Runs328/329 showed that adding a whole interval only
+    // to v/a alternately selected a late 21.9 m sample or an early 58.2 m
+    // sample. Constant measured deceleration over one bounded interval is
+    // sufficient here: unload now only when both the 40 m range gate and the
+    // calibrated physical-response gate are backward-reachable on that next
+    // sample.
+    LOCAL FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LOOKAHEAD IS
+        MIN(POWERED_MEASUREMENT_DT, 1.0).
+    LOCAL FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICT_HORIZON IS
+        FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LOOKAHEAD.
+    LOCAL FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_ALONG_RANGE IS
+        FINAL_ALIGN_PRECOMMIT_ALONG_RANGE.
+    LOCAL FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_RANGE IS
+        HORIZONTAL_POS:MAG.
+    LOCAL FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_SPEED IS
+        FINAL_ALIGN_PRECOMMIT_ALONG_CLOSING_SPEED.
+    LOCAL FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_STOP_TIME IS -1.
+    IF FINAL_ALIGN_PRECOMMIT_ALONG_CLOSING_SPEED > 0
+        AND FINAL_ALIGN_PRECOMMIT_REALIZED_DECEL > 0.5 {
+        SET FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_STOP_TIME TO
+            FINAL_ALIGN_PRECOMMIT_ALONG_CLOSING_SPEED
+                / FINAL_ALIGN_PRECOMMIT_REALIZED_DECEL.
+        SET FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICT_HORIZON TO
+            MIN(
+                FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LOOKAHEAD,
+                FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_STOP_TIME).
+        SET FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_ALONG_RANGE TO
+            FINAL_ALIGN_PRECOMMIT_ALONG_RANGE
+            - FINAL_ALIGN_PRECOMMIT_ALONG_CLOSING_SPEED
+                * FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICT_HORIZON
+            + 0.5 * FINAL_ALIGN_PRECOMMIT_REALIZED_DECEL
+                * FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICT_HORIZON^2.
+        SET FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_SPEED TO
+            MAX(FINAL_ALIGN_PRECOMMIT_ALONG_CLOSING_SPEED
+                - FINAL_ALIGN_PRECOMMIT_REALIZED_DECEL
+                    * FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICT_HORIZON,
+                0).
+        SET FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_STOP_TIME TO
+            FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_SPEED
+                / FINAL_ALIGN_PRECOMMIT_REALIZED_DECEL.
+        LOCAL FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_CROSS_POS IS
+            HORIZONTAL_POS - CONTROL_ALONG_DIRECTION
+                * FINAL_ALIGN_PRECOMMIT_ALONG_RANGE.
+        SET FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_RANGE TO
+            (FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_CROSS_POS
+                + CONTROL_ALONG_DIRECTION
+                    * FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_ALONG_RANGE)
+                :MAG.
+    }
+    LOCAL FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_THIS_TICK IS FALSE.
+    // Run332 changed the actuator endpoint from full high drag to full unload
+    // in one 0.86 s supervisor interval. The commanded along-axis component
+    // reversed, but the physical engine component remained targetward through
+    // the formal plane. When the unchanged unload surface is no more than one
+    // additional measured interval away, latch a midpoint reference first.
+    // This gives the direction/rate/torque cascade a real sample to integrate;
+    // it adds no translational force or actuator authority.
+    IF FINAL_ALIGN_MODE
+        AND FINAL_ALIGN_PRECOMMIT_REACHABILITY_LATCHED
+        AND NOT FINAL_DESCENT_ARMED
+        AND NOT FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREPOSITION_LATCHED
+        AND NOT FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LATCHED
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
+        AND HORIZONTAL_POS:MAG > FINAL_ALIGN_READY_ERROR
+        AND FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_RANGE
+            <= FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_MAX_RANGE
+        AND FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_STOP_TIME >= 0
+        AND FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_STOP_TIME
+            <= FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_RESPONSE_SECONDS
+                + FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LOOKAHEAD
+        AND FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_ALONG_RANGE
+            >= FINAL_ALIGN_PRECOMMIT_SETTLE_MIN_RANGE {
+        SET FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREPOSITION_LATCHED
+            TO TRUE.
+        LOG MISSION_ID + ",FINAL_ALIGN_RECOVERY_AERO_PREPOSITION,"
+            + ROUND(NOW,3)
+            + ",h=" + ROUND(HOOK_HEIGHT,2)
+            + ",range=" + ROUND(HORIZONTAL_POS:MAG,3)
+            + ",speed=" + ROUND(HORIZONTAL_VEL:MAG,3)
+            + ",lookahead=" + ROUND(
+                FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LOOKAHEAD,3)
+            + ",predictedRange=" + ROUND(
+                FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_RANGE,3)
+            + ",predictedSpeed=" + ROUND(
+                FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_SPEED,3)
+            + ",predictedStopTime=" + ROUND(
+                FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_STOP_TIME,3)
+            + ",blend=" + ROUND(ALONG_AERO_BRAKE_BLEND_STATE,3)
+            TO "0:/cz10b/telemetry.csv".
+    }
+    IF FINAL_ALIGN_MODE
+        AND FINAL_ALIGN_PRECOMMIT_REACHABILITY_LATCHED
+        AND NOT FINAL_DESCENT_ARMED
+        AND NOT FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LATCHED
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
+        AND HORIZONTAL_POS:MAG > FINAL_ALIGN_READY_ERROR
+        AND FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_RANGE
+            <= FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_MAX_RANGE
+        AND FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_STOP_TIME >= 0
+        AND FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_STOP_TIME
+            <= FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_RESPONSE_SECONDS
+        AND FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_ALONG_RANGE
+            >= FINAL_ALIGN_PRECOMMIT_SETTLE_MIN_RANGE {
+        LOG MISSION_ID + ",FINAL_ALIGN_RECOVERY_AERO_UNLOAD,"
+            + ROUND(NOW,3)
+            + ",h=" + ROUND(HOOK_HEIGHT,2)
+            + ",range=" + ROUND(HORIZONTAL_POS:MAG,3)
+            + ",speed=" + ROUND(HORIZONTAL_VEL:MAG,3)
+            + ",stopTime=" + ROUND(
+                FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_STOP_TIME,3)
+            + ",lookahead=" + ROUND(
+                FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LOOKAHEAD,3)
+            + ",predictedRange=" + ROUND(
+                FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_RANGE,3)
+            + ",predictedSpeed=" + ROUND(
+                FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_SPEED,3)
+            + ",predictedStopTime=" + ROUND(
+                FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_STOP_TIME,3)
+            + ",signedRange="
+                + ROUND(FINAL_ALIGN_PRECOMMIT_ALONG_RANGE,3)
+            + ",blend=" + ROUND(ALONG_AERO_BRAKE_BLEND_STATE,3)
+            + ",filteredAlong=" + ROUND(VDOT(
+                POWERED_FILTERED_HORIZONTAL_AERO_ACCEL,
+                CONTROL_ALONG_DIRECTION),3)
+            + ",rawAlong=" + ROUND(VDOT(
+                POWERED_HORIZONTAL_AERO_RAW_SAMPLE,
+                CONTROL_ALONG_DIRECTION),3)
+            TO "0:/cz10b/telemetry.csv".
+        SET FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LATCHED TO TRUE.
+        SET FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_THIS_TICK TO TRUE.
+        SET ALONG_AERO_BRAKE_BLEND_STATE TO 0.
+        SET POWERED_FILTERED_HORIZONTAL_AERO_ACCEL TO V(0,0,0).
     }
 
     // Run 252's fixed roll target did not prevent the physical thrust axis
@@ -2966,11 +3217,13 @@ UNTIL HOOK_CAPTURED() {
         AND HOOK_HEIGHT <= FINAL_CAPTURE_DIRECT_CONTROL_HEIGHT {
         SET CURRENT_ACCEL_FILTER TO 1.
     }
-    IF FIXED_STOP_COMMITTED_THIS_TICK {
+    IF FIXED_STOP_COMMITTED_THIS_TICK
+        OR FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_THIS_TICK {
         // Commitment is a one-way mode transition. Do not carry the preceding
         // unavailable-prograde command into the finite stopping footprint.
-        // H_ACCEL is already drag-compensated here, so this resets the engine
-        // request rather than mixing net and thrust accelerations.
+        // The recovery unload is likewise a one-way actuator transition and
+        // must not carry the high-drag cancellation command through the old
+        // command-memory pole. H_ACCEL is already drag-compensated here.
         SET FILTERED_H_ACCEL TO H_ACCEL.
     } ELSE {
         SET FILTERED_H_ACCEL TO FILTERED_H_ACCEL
@@ -3129,13 +3382,104 @@ UNTIL HOOK_CAPTURED() {
         * TAN(TILT_LIMIT).
     SET H_ACCEL TO CLAMPV(H_ACCEL, MAX_H_ACCEL).
     // Once the online attitude monitor detects a growing transverse mode,
-    // translation gives up control authority to attitude recovery. This latch
-    // is deliberately one-way: re-enabling position pursuit during the same
-    // low-altitude transient would create a hybrid limit cycle.
+    // translation gives up position pursuit but not velocity damping. Run314
+    // showed that zeroing the whole outer loop let residual attitude motion
+    // rebuild horizontal speed and cross the discontinuous 5 m/s safety-axis
+    // boundary with a nearly horizontal velocity vector. Keep a deliberately
+    // slow, bounded pole so the safe state remains invariant while the inner
+    // angular-rate loop recovers. This latch remains one-way.
     IF FINAL_CAPTURE_ATTITUDE_SAFE_MODE {
-        SET H_ACCEL TO V(0,0,0).
-        SET FILTERED_H_ACCEL TO V(0,0,0).
+        SET H_ACCEL TO CLAMPV(
+            -HORIZONTAL_VEL
+                * FINAL_CAPTURE_ATTITUDE_SAFE_DAMPING_VELOCITY_GAIN,
+            FINAL_CAPTURE_ATTITUDE_SAFE_DAMPING_MAX_ACCEL).
+        SET FILTERED_H_ACCEL TO H_ACCEL.
     }
+    // The physical 5 m/s comparison-axis switch is harmless only while
+    // surface retrograde remains close enough to local up that the up-centred
+    // soft command cone and velocity-centred hard cone still intersect.
+    // Monitor the continuous velocity geometry on both sides of that switch.
+    // Predict horizontal speed through the measured attitude response and
+    // override only the horizontal engine-vector request when the smaller
+    // operating set is about to be left. This is a physical G-04 translation
+    // barrier on every powered continuation, independent of whether G-05C has
+    // committed; the inner direction/rate/torque cascade remains unchanged.
+    LOCAL FINAL_CAPTURE_VELOCITY_AXIS_SEPARATION IS 0.
+    LOCAL FINAL_CAPTURE_VELOCITY_AXIS_SPEED_LIMIT IS 0.
+    LOCAL FINAL_CAPTURE_VELOCITY_AXIS_PREDICTED_SPEED IS
+        HORIZONTAL_VEL:MAG.
+    LOCAL FINAL_CAPTURE_VELOCITY_AXIS_RAW_SPEED_GROWTH IS 0.
+    LOCAL FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_ACTIVE IS FALSE.
+    LOCAL FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_ACCEL IS 0.
+    IF SHIP:VELOCITY:SURFACE:MAG > 0.001 {
+        SET FINAL_CAPTURE_VELOCITY_AXIS_SEPARATION TO VANG(
+            UP_VEC, -SHIP:VELOCITY:SURFACE:NORMALIZED).
+    }
+    SET FINAL_CAPTURE_VELOCITY_AXIS_SPEED_LIMIT TO
+        MAX(-VERTICAL_V, CAPTURE_FINAL_SPEED)
+        * TAN(FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_DEGREES).
+    IF HORIZONTAL_VEL:MAG > 0.01 {
+        LOCAL FINAL_CAPTURE_VELOCITY_AXIS_DIRECTION IS
+            HORIZONTAL_VEL:NORMALIZED.
+        SET FINAL_CAPTURE_VELOCITY_AXIS_RAW_SPEED_GROWTH TO VDOT(
+            VXCL(UP_VEC, POWERED_MEASURED_ACCEL),
+            FINAL_CAPTURE_VELOCITY_AXIS_DIRECTION).
+        LOCAL FINAL_CAPTURE_VELOCITY_AXIS_FILTER_BLEND IS
+            POWERED_MEASUREMENT_DT
+            / (FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_RATE_FILTER_SECONDS
+                + POWERED_MEASUREMENT_DT).
+        SET FINAL_CAPTURE_VELOCITY_AXIS_FILTERED_SPEED_GROWTH TO
+            FINAL_CAPTURE_VELOCITY_AXIS_FILTERED_SPEED_GROWTH
+                * (1 - FINAL_CAPTURE_VELOCITY_AXIS_FILTER_BLEND)
+            + FINAL_CAPTURE_VELOCITY_AXIS_RAW_SPEED_GROWTH
+                * FINAL_CAPTURE_VELOCITY_AXIS_FILTER_BLEND.
+        SET FINAL_CAPTURE_VELOCITY_AXIS_PREDICTED_SPEED TO
+            HORIZONTAL_VEL:MAG
+            + MAX(FINAL_CAPTURE_VELOCITY_AXIS_FILTERED_SPEED_GROWTH, 0)
+                * FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_RESPONSE_SECONDS.
+        IF HOOK_HEIGHT <= FINAL_CAPTURE_ATTITUDE_MONITOR_HEIGHT
+            AND FINAL_CAPTURE_VELOCITY_AXIS_PREDICTED_SPEED
+                > FINAL_CAPTURE_VELOCITY_AXIS_SPEED_LIMIT {
+            SET FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_ACTIVE TO TRUE.
+            LOCAL FINAL_CAPTURE_VELOCITY_AXIS_EXCESS IS
+                FINAL_CAPTURE_VELOCITY_AXIS_PREDICTED_SPEED
+                - FINAL_CAPTURE_VELOCITY_AXIS_SPEED_LIMIT.
+            SET FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_ACCEL TO MIN(
+                FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_MAX_ACCEL,
+                MAX(
+                    -VDOT(H_ACCEL,
+                        FINAL_CAPTURE_VELOCITY_AXIS_DIRECTION),
+                    MAX(FINAL_CAPTURE_VELOCITY_AXIS_FILTERED_SPEED_GROWTH, 0)
+                        + FINAL_CAPTURE_VELOCITY_AXIS_EXCESS
+                            * FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_GAIN)).
+            SET H_ACCEL TO -FINAL_CAPTURE_VELOCITY_AXIS_DIRECTION
+                * FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_ACCEL.
+            SET FILTERED_H_ACCEL TO H_ACCEL.
+        }
+    } ELSE {
+        SET FINAL_CAPTURE_VELOCITY_AXIS_FILTERED_SPEED_GROWTH TO 0.
+    }
+    IF FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_ACTIVE
+        AND NOT FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_PREVIOUS_ACTIVE {
+        LOG MISSION_ID + ",FINAL_CAPTURE_VELOCITY_AXIS_BARRIER,"
+            + ROUND(NOW,3)
+            + ",h=" + ROUND(HOOK_HEIGHT,2)
+            + ",separation="
+                + ROUND(FINAL_CAPTURE_VELOCITY_AXIS_SEPARATION,3)
+            + ",speed=" + ROUND(HORIZONTAL_VEL:MAG,3)
+            + ",predicted="
+                + ROUND(FINAL_CAPTURE_VELOCITY_AXIS_PREDICTED_SPEED,3)
+            + ",limit="
+                + ROUND(FINAL_CAPTURE_VELOCITY_AXIS_SPEED_LIMIT,3)
+            + ",growth="
+                + ROUND(
+                    FINAL_CAPTURE_VELOCITY_AXIS_FILTERED_SPEED_GROWTH,3)
+            + ",accel="
+                + ROUND(FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_ACCEL,3)
+            TO "0:/cz10b/telemetry.csv".
+    }
+    SET FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_PREVIOUS_ACTIVE TO
+        FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_ACTIVE.
     LOCAL DESIRED_THRUST IS UP_VEC * MAX(VERTICAL_THRUST_CMD, G_ACC * 0.2)
         + H_ACCEL.
     LOCAL TERMINAL_THRUST_LIMIT_FRACTION IS
@@ -3164,8 +3508,8 @@ UNTIL HOOK_CAPTURED() {
     // direction after magnitude had already been solved; run 13 therefore
     // applied near-horizontal thrust to a command that requested 28.9 degrees
     // from local up, stopped 5 km short, and rebounded.  Prelead remains an
-    // unpowered ignition-alignment aid.  The final safety projection below
-    // still enforces the narrowed command cone on this live trajectory vector.
+    // unpowered ignition-alignment aid. The narrowed command cone is formed
+    // below before the low-altitude reference governor.
     LOCAL ACTUAL_THRUST_TILT IS VANG(SHIP:FACING:VECTOR, UP_VEC).
     LOCAL WAYPOINT_TRIM_ACTIVE IS FALSE.
     IF WAYPOINT_COAST_MODE
@@ -3609,11 +3953,144 @@ UNTIL HOOK_CAPTURED() {
             MAIN_ALONG_AERO_BRAKE_RANGE_REQUIRED)).
     LOCAL MAIN_ALONG_AERO_BRAKE_REALIZED IS MAX(-VDOT(
         POWERED_MEASURED_ACCEL, CONTROL_ALONG_DIRECTION), 0).
+    // The ratio-only tail schedule cannot distinguish the Run309 near-side
+    // stop from Run310's far-side crossing.  Govern the same bounded physical
+    // actuator from the live formal-plane state instead.  The phase reference
+    // asks whether current closing speed is too high for the remaining signed
+    // range and time; the independent speed barrier prevents a low-drag
+    // position correction from violating the 5 m/s formal gate.
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_ACTIVE IS
+        TERMINAL_FORMAL_PLANE_GOVERNOR_ENABLED
+        AND FINAL_ALIGN_TERMINAL_PHASE_LATCHED
+        AND HOOK_HEIGHT
+            <= TERMINAL_FORMAL_PLANE_GOVERNOR_START_HEIGHT
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT.
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_TGO IS MAX(
+        MAIN_ALONG_AERO_BRAKE_TGO, 0.5).
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_ALONG_POS IS VDOT(
+        HORIZONTAL_POS, CONTROL_ALONG_DIRECTION).
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_REFERENCE_SPEED IS 0.
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_PHASE_ERROR IS 0.
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_DECEL_SCALE IS 1.
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_SPEED_REQUIRED IS 0.
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_EFFECTIVE_REALIZED IS
+        MAIN_ALONG_AERO_BRAKE_REALIZED.
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_PHASE_CONTROL_ERROR IS 0.
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_SPEED_BARRIER_ERROR IS 0.
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_ENVELOPE_DESIRED_DECEL IS 0.
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_BARRIER_BLEND IS 0.
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_REACHABILITY_OVERRIDE IS FALSE.
+    LOCAL MAIN_FORMAL_PLANE_GOVERNOR_ERROR IS 0.
+    IF MAIN_FORMAL_PLANE_GOVERNOR_ACTIVE {
+        SET MAIN_FORMAL_PLANE_GOVERNOR_REFERENCE_SPEED TO
+            2 * MAX(
+                MAIN_FORMAL_PLANE_GOVERNOR_ALONG_POS
+                    - TERMINAL_FORMAL_PLANE_GOVERNOR_TARGET_ALONG_POSITION,
+                0)
+                / MAIN_FORMAL_PLANE_GOVERNOR_TGO
+            - TERMINAL_FORMAL_PLANE_GOVERNOR_TARGET_ALONG_SPEED
+            + TERMINAL_FORMAL_PLANE_GOVERNOR_FRONTLOAD_SPEED_BIAS.
+        SET MAIN_FORMAL_PLANE_GOVERNOR_PHASE_ERROR TO
+            MAIN_ALONG_VEL
+                - MAIN_FORMAL_PLANE_GOVERNOR_REFERENCE_SPEED.
+        SET MAIN_FORMAL_PLANE_GOVERNOR_DECEL_SCALE TO
+            TERMINAL_FORMAL_PLANE_GOVERNOR_MIN_DECEL_SCALE
+            + (1 - TERMINAL_FORMAL_PLANE_GOVERNOR_MIN_DECEL_SCALE)
+                * CLAMP(
+                    (TERMINAL_FORMAL_PLANE_GOVERNOR_START_HEIGHT
+                        - HOOK_HEIGHT)
+                    / MAX(
+                        TERMINAL_FORMAL_PLANE_GOVERNOR_START_HEIGHT
+                            - TERMINAL_FORMAL_PLANE_GOVERNOR_FULL_SCALE_HEIGHT,
+                        1),
+                    0, 1).
+        SET MAIN_FORMAL_PLANE_GOVERNOR_SPEED_REQUIRED TO MAX(
+            (MAIN_ALONG_VEL
+                - TERMINAL_FORMAL_PLANE_GOVERNOR_TARGET_ALONG_SPEED)
+                / MAIN_FORMAL_PLANE_GOVERNOR_TGO,
+            0) * TERMINAL_ALONG_AERO_BRAKE_MARGIN.
+        SET MAIN_FORMAL_PLANE_GOVERNOR_EFFECTIVE_REALIZED TO
+            MAIN_ALONG_AERO_BRAKE_REALIZED
+                * MAIN_FORMAL_PLANE_GOVERNOR_DECEL_SCALE.
+        SET MAIN_FORMAL_PLANE_GOVERNOR_PHASE_CONTROL_ERROR TO
+            MAIN_FORMAL_PLANE_GOVERNOR_PHASE_ERROR
+                * TERMINAL_FORMAL_PLANE_GOVERNOR_PHASE_GAIN.
+        SET MAIN_FORMAL_PLANE_GOVERNOR_SPEED_BARRIER_ERROR TO
+            MAIN_FORMAL_PLANE_GOVERNOR_SPEED_REQUIRED
+                - MAIN_FORMAL_PLANE_GOVERNOR_EFFECTIVE_REALIZED.
+        IF FINAL_ALIGN_PRECOMMIT_REACHABILITY_LATCHED {
+            // Track the derivative of the same spatial speed reference used
+            // by the outer loop. Run317 used only proportional speed error,
+            // which makes zero curve error request zero acceleration and
+            // guarantees a growing lag on a falling reference. Compare the
+            // nominal-plus-feedback deceleration with the measured plant.
+            // Run323 exposed that using a separate 0.25 feedback gain here
+            // contradicted the outer loop's 0.90 request. Reuse the exact
+            // bounded virtual control constructed by that outer loop.
+            SET MAIN_FORMAL_PLANE_GOVERNOR_ENVELOPE_DESIRED_DECEL TO
+                FINAL_ALIGN_PRECOMMIT_ENVELOPE_DESIRED_DECEL.
+            SET MAIN_FORMAL_PLANE_GOVERNOR_SPEED_BARRIER_ERROR TO
+                MAIN_FORMAL_PLANE_GOVERNOR_ENVELOPE_DESIRED_DECEL
+                - MAIN_FORMAL_PLANE_GOVERNOR_EFFECTIVE_REALIZED.
+        }
+        IF HOOK_HEIGHT
+                > TERMINAL_ALONG_AERO_BRAKE_FULL_HOLD_END_HEIGHT {
+            // In the 5--4 km preparation band, only a phase deficit may move
+            // the frozen hold: release early when range is being consumed too
+            // slowly, but leave positive braking requests to the proven hold.
+            SET MAIN_FORMAL_PLANE_GOVERNOR_ERROR TO MIN(
+                MAIN_FORMAL_PLANE_GOVERNOR_PHASE_CONTROL_ERROR, 0).
+        } ELSE {
+            // Below 4 km this is a two-move switching surface.  A large
+            // negative phase error reserves travel first; the terminal-speed
+            // barrier blends in only as that deficit approaches zero.  Run311
+            // showed that an unconditional MAX selected braking throughout an
+            // infeasible conflict and stopped 100 m short.
+            SET MAIN_FORMAL_PLANE_GOVERNOR_BARRIER_BLEND TO CLAMP(
+                (MAIN_FORMAL_PLANE_GOVERNOR_PHASE_ERROR
+                    - TERMINAL_FORMAL_PLANE_GOVERNOR_BARRIER_START_PHASE_ERROR)
+                / MAX(
+                    TERMINAL_FORMAL_PLANE_GOVERNOR_BARRIER_FULL_PHASE_ERROR
+                        - TERMINAL_FORMAL_PLANE_GOVERNOR_BARRIER_START_PHASE_ERROR,
+                    0.1),
+                0, 1).
+            // Run313's outer settle latch crossed its live stopping surface at
+            // 3.815 km, but this separate phase blend stayed zero and continued
+            // releasing the actuator until 2.63 km.  A cascade cannot use two
+            // contradictory reachable sets: after the live latch commits,
+            // give its speed barrier full arbitration authority.  Before the
+            // latch, high-range Run311-like states retain phase-first release.
+            IF FINAL_ALIGN_PRECOMMIT_REACHABILITY_LATCHED {
+                SET MAIN_FORMAL_PLANE_GOVERNOR_BARRIER_BLEND TO 1.
+                SET MAIN_FORMAL_PLANE_GOVERNOR_REACHABILITY_OVERRIDE TO TRUE.
+            }
+            LOCAL MAIN_FORMAL_PLANE_GOVERNOR_CONSTRAINED_ERROR IS MAX(
+                MAIN_FORMAL_PLANE_GOVERNOR_PHASE_CONTROL_ERROR,
+                MAIN_FORMAL_PLANE_GOVERNOR_SPEED_BARRIER_ERROR).
+            SET MAIN_FORMAL_PLANE_GOVERNOR_ERROR TO
+                MAIN_FORMAL_PLANE_GOVERNOR_PHASE_CONTROL_ERROR
+                + (MAIN_FORMAL_PLANE_GOVERNOR_CONSTRAINED_ERROR
+                    - MAIN_FORMAL_PLANE_GOVERNOR_PHASE_CONTROL_ERROR)
+                    * MAIN_FORMAL_PLANE_GOVERNOR_BARRIER_BLEND.
+        }
+    }
     LOCAL MAIN_ALONG_AERO_BRAKE_ERROR IS
         MAIN_ALONG_AERO_BRAKE_REQUIRED
             - MAIN_ALONG_AERO_BRAKE_REALIZED.
+    LOCAL MAIN_ALONG_AERO_BRAKE_NOMINAL_ERROR IS
+        MAIN_ALONG_AERO_BRAKE_ERROR.
+    IF MAIN_FORMAL_PLANE_GOVERNOR_ACTIVE {
+        SET MAIN_ALONG_AERO_BRAKE_ERROR TO
+            MAIN_FORMAL_PLANE_GOVERNOR_ERROR.
+    }
+    LOCAL MAIN_ALONG_AERO_BRAKE_ACTIVE_ERROR_DEADBAND IS
+        TERMINAL_ALONG_AERO_BRAKE_ERROR_DEADBAND.
+    IF MAIN_FORMAL_PLANE_GOVERNOR_ACTIVE {
+        SET MAIN_ALONG_AERO_BRAKE_ACTIVE_ERROR_DEADBAND TO
+            TERMINAL_FORMAL_PLANE_GOVERNOR_ERROR_DEADBAND.
+    }
     IF ABS(MAIN_ALONG_AERO_BRAKE_ERROR)
-            <= TERMINAL_ALONG_AERO_BRAKE_ERROR_DEADBAND {
+            <= MAIN_ALONG_AERO_BRAKE_ACTIVE_ERROR_DEADBAND {
         SET MAIN_ALONG_AERO_BRAKE_ERROR TO 0.
     }
     LOCAL MAIN_ALONG_AERO_BRAKE_RATE IS
@@ -3665,9 +4142,16 @@ UNTIL HOOK_CAPTURED() {
         AND HOOK_HEIGHT
             > FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_END_HEIGHT
         AND MAIN_ALONG_VEL > TERMINAL_ALONG_AERO_BRAKE_RELEASE_SPEED {
-        SET ALONG_AERO_BRAKE_BLEND_STATE TO
-            TERMINAL_ALONG_AERO_BRAKE_MAX_BLEND
-                * FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_SCALE.
+        IF MAIN_FORMAL_PLANE_GOVERNOR_ACTIVE {
+            SET ALONG_AERO_BRAKE_BLEND_STATE TO MIN(
+                ALONG_AERO_BRAKE_BLEND_STATE,
+                TERMINAL_ALONG_AERO_BRAKE_MAX_BLEND
+                    * FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_SCALE).
+        } ELSE {
+            SET ALONG_AERO_BRAKE_BLEND_STATE TO
+                TERMINAL_ALONG_AERO_BRAKE_MAX_BLEND
+                    * FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_SCALE.
+        }
     }
     // The frozen low-ratio branch also bounds tail authority. Run 166's 0.50
     // crossed fast; Run 167's immediate 0.75 stopped 30 m short. Ramp between
@@ -3711,6 +4195,7 @@ UNTIL HOOK_CAPTURED() {
             FINAL_ALIGN_PRECOMMIT_REACHABILITY_TAIL_CEILING).
     }
     IF FINAL_ALIGN_TERMINAL_PHASE_LATCHED
+        AND NOT MAIN_FORMAL_PLANE_GOVERNOR_ACTIVE
         AND HOOK_HEIGHT
             <= FINAL_ALIGN_TERMINAL_AERO_BRAKE_HOLD_END_HEIGHT
         AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
@@ -3723,11 +4208,16 @@ UNTIL HOOK_CAPTURED() {
     // A ceiling alone did not bring the long body's physical drag attitude
     // forward before the formal plane in Run306. For the frozen extreme-low
     // reachability family, add a continuous late floor while physical range
-    // and closing speed are still positive. It never raises the tested
-    // endpoint or survives a target crossing.
+    // and closing speed are still positive. Run324 showed that disabling this
+    // floor under the live governor lets its slow actuator unwind from 0.65
+    // to 0.41, then demand a physically impossible rebuild below 2.3 km.
+    // The live error still owns the outer request; this floor preserves the
+    // bounded actuator state needed to realise that request. It never raises
+    // the tested endpoint or survives a target crossing.
     LOCAL FINAL_ALIGN_TERMINAL_EXTREME_LOW_LATE_FLOOR IS 0.
     IF FINAL_ALIGN_TERMINAL_EXTREME_LOW_PHASE_SHAPED
         AND FINAL_ALIGN_PRECOMMIT_REACHABILITY_LATCHED
+        AND NOT FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LATCHED
         AND HOOK_HEIGHT
             <= FINAL_ALIGN_TERMINAL_EXTREME_LOW_LATE_FLOOR_START_HEIGHT
         AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
@@ -3753,6 +4243,16 @@ UNTIL HOOK_CAPTURED() {
                     FINAL_ALIGN_TERMINAL_EXTREME_LOW_LATE_FLOOR,
                     FINAL_ALIGN_TERMINAL_AERO_BRAKE_TAIL_CEILING)).
     }
+    // Apply the Run332 precursor after every ordinary governor/floor update so
+    // no upstream hold can rebuild the high-drag endpoint. The normal unload
+    // latch on the following surface still releases this coordinate to zero.
+    IF FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREPOSITION_LATCHED
+        AND NOT FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LATCHED
+        AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT {
+        SET ALONG_AERO_BRAKE_BLEND_STATE TO MIN(
+            ALONG_AERO_BRAKE_BLEND_STATE,
+            FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREPOSITION_BLEND).
+    }
     // Runs 119--121 proved that merely releasing allocator ownership leaves
     // the fallback trajectory on a 10--15 degree cone while the long stage is
     // still near 21 degrees, carrying signed speed through zero. Once the
@@ -3770,6 +4270,7 @@ UNTIL HOOK_CAPTURED() {
     }
     LOCAL MAIN_ALONG_AERO_BRAKE_AXIS_DIAG IS 0.
     IF TERMINAL_ALONG_AERO_BRAKE_ENABLED
+        AND NOT FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LATCHED
         AND HOOK_HEIGHT > TERMINAL_WAYPOINT_HEIGHT
         AND MAIN_ALONG_VEL > TERMINAL_ALONG_AERO_BRAKE_RELEASE_SPEED
         AND MAIN_ALONG_AERO_BRAKE_HEIGHT_BLEND > 0 {
@@ -4058,6 +4559,7 @@ UNTIL HOOK_CAPTURED() {
         AND ACTUAL_CONE_GUARD_ANGLE
             >= FINAL_CAPTURE_ATTITUDE_SAFE_CONE_BARRIER_DEGREES.
     LOCAL FINAL_CAPTURE_ATTITUDE_REQUESTED_TARGET_RATE IS 0.
+    LOCAL FINAL_CAPTURE_ATTITUDE_LEGAL_TARGET_RATE IS 0.
     LOCAL FINAL_CAPTURE_ATTITUDE_GOVERNOR_TARGET_RATE IS 0.
     LOCAL FINAL_CAPTURE_ATTITUDE_APPLIED_TARGET_RATE IS 0.
     LOCAL FINAL_CAPTURE_ATTITUDE_SAFETY_PROJECTION_ANGLE IS 0.
@@ -4068,6 +4570,10 @@ UNTIL HOOK_CAPTURED() {
     LOCAL FINAL_CAPTURE_ATTITUDE_ENERGY_GROWTH_RATE IS 0.
     LOCAL FINAL_CAPTURE_ATTITUDE_EFFECTIVE_COMMAND_CONE_DEGREES IS
         ACTIVE_COMMAND_CONE_DEGREES.
+    LOCAL FINAL_CAPTURE_ATTITUDE_CONSTRAINT_AXIS_SEPARATION IS 0.
+    LOCAL FINAL_CAPTURE_ATTITUDE_CONSTRAINT_MARGIN IS
+        TERMINAL_VELOCITY_CONE_DEGREES.
+    LOCAL FINAL_CAPTURE_ATTITUDE_SOFT_HARD_FEASIBLE IS TRUE.
     IF FINAL_CAPTURE_ATTITUDE_SAFE_MODE
         OR FINAL_CAPTURE_ATTITUDE_CONE_BARRIER_TRIGGERED {
         SET FINAL_CAPTURE_ATTITUDE_EFFECTIVE_COMMAND_CONE_DEGREES TO
@@ -4076,15 +4582,59 @@ UNTIL HOOK_CAPTURED() {
     IF FINAL_CAPTURE_ATTITUDE_MONITOR_ACTIVE {
         LOCAL FINAL_CAPTURE_ATTITUDE_WAS_INITIALIZED IS
             FINAL_CAPTURE_ATTITUDE_TARGET_INITIALIZED.
+        LOCAL FINAL_CAPTURE_ATTITUDE_RECOVERY_REFERENCE_ACTIVE IS
+            FINAL_CAPTURE_ATTITUDE_SAFE_MODE
+            OR FINAL_CAPTURE_ATTITUDE_CONE_BARRIER_TRIGGERED.
         LOCAL FINAL_CAPTURE_ATTITUDE_REQUESTED_TARGET IS
             STEERING_THRUST:NORMALIZED.
-        IF FINAL_CAPTURE_ATTITUDE_SAFE_MODE
-            OR FINAL_CAPTURE_ATTITUDE_CONE_BARRIER_TRIGGERED {
-            SET FINAL_CAPTURE_ATTITUDE_REQUESTED_TARGET TO UP_VEC.
+        LOCAL FINAL_CAPTURE_ATTITUDE_SOFT_AXIS IS
+            FINAL_THRUST_SAFETY_AXIS.
+        // Run321 proved that constraining the governor output around the
+        // moving velocity/up axis is not a rate governor: raw request was
+        // 119 deg/s, the governor returned 3 deg/s, then the following
+        // projection applied 19 deg/s and drove actual cone through 30 deg.
+        // In recovery, form a continuous local-up soft target *before* slew
+        // limiting. DESIRED_THRUST contains only the retained pure velocity
+        // damper after the one-way safe latch, so this preserves Run319's
+        // translation repair without following the discontinuous 5 m/s axis.
+        IF FINAL_CAPTURE_ATTITUDE_RECOVERY_REFERENCE_ACTIVE {
+            SET FINAL_CAPTURE_ATTITUDE_SOFT_AXIS TO UP_VEC.
         }
+        IF NOT FINAL_CAPTURE_ATTITUDE_SAFE_MODE
+            AND FINAL_CAPTURE_ATTITUDE_CONE_BARRIER_TRIGGERED {
+            SET FINAL_CAPTURE_ATTITUDE_REQUESTED_TARGET TO UP_VEC.
+        } ELSE IF FINAL_CAPTURE_ATTITUDE_SAFE_MODE {
+            SET FINAL_CAPTURE_ATTITUDE_REQUESTED_TARGET TO
+                DESIRED_THRUST:NORMALIZED.
+        }
+        SET FINAL_CAPTURE_ATTITUDE_CONSTRAINT_AXIS_SEPARATION TO VANG(
+            FINAL_CAPTURE_ATTITUDE_SOFT_AXIS,
+            FINAL_THRUST_SAFETY_AXIS).
+        SET FINAL_CAPTURE_ATTITUDE_CONSTRAINT_MARGIN TO
+            FINAL_CAPTURE_ATTITUDE_EFFECTIVE_COMMAND_CONE_DEGREES
+            + TERMINAL_VELOCITY_CONE_DEGREES
+            - FINAL_CAPTURE_ATTITUDE_CONSTRAINT_AXIS_SEPARATION.
+        SET FINAL_CAPTURE_ATTITUDE_SOFT_HARD_FEASIBLE TO
+            FINAL_CAPTURE_ATTITUDE_CONSTRAINT_MARGIN >= 0.
+        LOCAL FINAL_CAPTURE_ATTITUDE_SOFT_LEGAL_TARGET IS
+            CONSTRAIN_THRUST_VECTOR(
+                FINAL_CAPTURE_ATTITUDE_REQUESTED_TARGET,
+                FINAL_CAPTURE_ATTITUDE_SOFT_AXIS,
+                FINAL_CAPTURE_ATTITUDE_EFFECTIVE_COMMAND_CONE_DEGREES)
+                :NORMALIZED.
+        // Both command constraints belong to the outer reference governor.
+        // Applying either one after the governor would bypass its angular-rate
+        // limit. The velocity-axis barrier above is responsible for keeping
+        // this two-cone set non-empty and rate reachable.
+        LOCAL FINAL_CAPTURE_ATTITUDE_LEGAL_TARGET IS
+            CONSTRAIN_THRUST_VECTOR(
+                FINAL_CAPTURE_ATTITUDE_SOFT_LEGAL_TARGET,
+                FINAL_THRUST_SAFETY_AXIS,
+                TERMINAL_VELOCITY_CONE_DEGREES)
+                :NORMALIZED.
         IF NOT FINAL_CAPTURE_ATTITUDE_TARGET_INITIALIZED {
             SET FINAL_CAPTURE_ATTITUDE_PREVIOUS_TARGET TO
-                FINAL_CAPTURE_ATTITUDE_REQUESTED_TARGET.
+                FINAL_CAPTURE_ATTITUDE_LEGAL_TARGET.
             SET FINAL_CAPTURE_ATTITUDE_TARGET_INITIALIZED TO TRUE.
         }
         LOCAL FINAL_CAPTURE_ATTITUDE_TARGET_ANGLE IS VANG(
@@ -4092,6 +4642,10 @@ UNTIL HOOK_CAPTURED() {
             FINAL_CAPTURE_ATTITUDE_REQUESTED_TARGET).
         SET FINAL_CAPTURE_ATTITUDE_REQUESTED_TARGET_RATE TO
             FINAL_CAPTURE_ATTITUDE_TARGET_ANGLE
+            / MAX(POWERED_MEASUREMENT_DT, 0.001).
+        SET FINAL_CAPTURE_ATTITUDE_LEGAL_TARGET_RATE TO VANG(
+            FINAL_CAPTURE_ATTITUDE_PREVIOUS_TARGET,
+            FINAL_CAPTURE_ATTITUDE_LEGAL_TARGET)
             / MAX(POWERED_MEASUREMENT_DT, 0.001).
         // This is a physical slew limit, so use elapsed simulation time rather
         // than the 0.1 s DT cap retained for historically tuned PID updates.
@@ -4102,37 +4656,38 @@ UNTIL HOOK_CAPTURED() {
             * POWERED_MEASUREMENT_DT.
         LOCAL FINAL_CAPTURE_ATTITUDE_GOVERNED_TARGET IS LIMIT_VECTOR_SLEW(
             FINAL_CAPTURE_ATTITUDE_PREVIOUS_TARGET,
-            FINAL_CAPTURE_ATTITUDE_REQUESTED_TARGET,
+            FINAL_CAPTURE_ATTITUDE_LEGAL_TARGET,
             FINAL_CAPTURE_ATTITUDE_MAX_TARGET_STEP).
         SET FINAL_CAPTURE_ATTITUDE_GOVERNOR_TARGET_RATE TO VANG(
             FINAL_CAPTURE_ATTITUDE_PREVIOUS_TARGET,
             FINAL_CAPTURE_ATTITUDE_GOVERNED_TARGET)
             / MAX(POWERED_MEASUREMENT_DT, 0.001).
 
-        // Safety dominates smoothness. The safety axis can change when the
-        // surface-speed regime changes, so the governor's output must be
-        // projected into the *current* cone. Applied target rate may exceed
-        // the governor limit only by this recorded projection.
-        LOCAL FINAL_CAPTURE_ATTITUDE_SAFE_TARGET IS
+        // The immutable 30-degree physical cone remains a final diagnostic.
+        // A non-zero projection means the controlled invariant set or its
+        // rate-reachable subset was lost. It must not generate an instantaneous
+        // command after the governor: Run327 measured a valid 3 deg/s governor
+        // output followed by a 414 deg/s hard-projection target jump.
+        LOCAL FINAL_CAPTURE_ATTITUDE_VERIFIED_TARGET IS
             CONSTRAIN_THRUST_VECTOR(
                 FINAL_CAPTURE_ATTITUDE_GOVERNED_TARGET,
                 FINAL_THRUST_SAFETY_AXIS,
-                FINAL_CAPTURE_ATTITUDE_EFFECTIVE_COMMAND_CONE_DEGREES)
+                TERMINAL_VELOCITY_CONE_DEGREES)
                 :NORMALIZED.
         SET FINAL_CAPTURE_ATTITUDE_SAFETY_PROJECTION_ANGLE TO VANG(
             FINAL_CAPTURE_ATTITUDE_GOVERNED_TARGET,
-            FINAL_CAPTURE_ATTITUDE_SAFE_TARGET).
+            FINAL_CAPTURE_ATTITUDE_VERIFIED_TARGET).
         SET FINAL_CAPTURE_ATTITUDE_APPLIED_TARGET_RATE TO VANG(
             FINAL_CAPTURE_ATTITUDE_PREVIOUS_TARGET,
-            FINAL_CAPTURE_ATTITUDE_SAFE_TARGET)
+            FINAL_CAPTURE_ATTITUDE_GOVERNED_TARGET)
             / MAX(POWERED_MEASUREMENT_DT, 0.001).
-        SET STEERING_THRUST TO FINAL_CAPTURE_ATTITUDE_SAFE_TARGET.
+        SET STEERING_THRUST TO FINAL_CAPTURE_ATTITUDE_GOVERNED_TARGET.
 
         LOCAL FINAL_CAPTURE_ATTITUDE_BODY_AXIS IS
             SHIP:FACING:VECTOR:NORMALIZED.
         SET FINAL_CAPTURE_ATTITUDE_ERROR TO VANG(
             FINAL_CAPTURE_ATTITUDE_BODY_AXIS,
-            FINAL_CAPTURE_ATTITUDE_SAFE_TARGET).
+            FINAL_CAPTURE_ATTITUDE_GOVERNED_TARGET).
         SET FINAL_CAPTURE_ATTITUDE_REPORTED_TOTAL_RATE TO
             SHIP:ANGULARVEL:MAG * CONSTANT:RADTODEG.
         // Run263 proved that projecting the reported angular-velocity vector
@@ -4260,13 +4815,17 @@ UNTIL HOOK_CAPTURED() {
         SET FINAL_CAPTURE_ATTITUDE_PREVIOUS_ENERGY TO
             FINAL_CAPTURE_ATTITUDE_ENERGY.
     }
-    // Enforce the powered-flight cone after every guidance and governor
-    // branch, including above the low-altitude monitor. This is intentionally
-    // the final direction operation before the steering lock; repeating an
-    // already-safe projection is idempotent.
-    SET STEERING_THRUST TO CONSTRAIN_THRUST_VECTOR(
-        STEERING_THRUST, FINAL_THRUST_SAFETY_AXIS,
-        FINAL_CAPTURE_ATTITUDE_EFFECTIVE_COMMAND_CONE_DEGREES).
+    // Above the low-altitude monitor, retain the ordinary final projection.
+    // Below it, both soft and hard constraints were already applied before the
+    // reference governor. Reapplying either constraint here would recreate the
+    // Run321/Run327 post-governor target-rate bypass.
+    LOCAL FINAL_CAPTURE_ATTITUDE_FINAL_CONE_DEGREES IS
+        FINAL_CAPTURE_ATTITUDE_EFFECTIVE_COMMAND_CONE_DEGREES.
+    IF NOT FINAL_CAPTURE_ATTITUDE_MONITOR_ACTIVE {
+        SET STEERING_THRUST TO CONSTRAIN_THRUST_VECTOR(
+            STEERING_THRUST, FINAL_THRUST_SAFETY_AXIS,
+            FINAL_CAPTURE_ATTITUDE_FINAL_CONE_DEGREES).
+    }
     SET FLIGHT_STEERING_CMD TO LOOKDIRUP(STEERING_THRUST,
         STEERING_ROLL_REFERENCE).
     SET FLIGHT_THROTTLE_CMD TO THROTTLE_CMD.
@@ -4476,6 +5035,27 @@ UNTIL HOOK_CAPTURED() {
                 + FINAL_ALIGN_PRECOMMIT_SETTLE
             + ",finalAlignPrecommitReachabilityLatched="
                 + FINAL_ALIGN_PRECOMMIT_REACHABILITY_LATCHED
+            + ",finalAlignPrecommitRecoveryAeroPreposition="
+                + FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREPOSITION_LATCHED
+            + ",finalAlignPrecommitRecoveryAeroUnload="
+                + FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LATCHED
+            + ",finalAlignPrecommitRecoveryAeroUnloadThisTick="
+                + FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_THIS_TICK
+            + ",finalAlignPrecommitRecoveryAeroUnloadStopTime="
+                + ROUND(
+                    FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_STOP_TIME,3)
+            + ",finalAlignPrecommitRecoveryAeroUnloadLookahead="
+                + ROUND(
+                    FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_LOOKAHEAD,3)
+            + ",finalAlignPrecommitRecoveryAeroUnloadPredictedRange="
+                + ROUND(
+                    FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_RANGE,3)
+            + ",finalAlignPrecommitRecoveryAeroUnloadPredictedSpeed="
+                + ROUND(
+                    FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_SPEED,3)
+            + ",finalAlignPrecommitRecoveryAeroUnloadPredictedStopTime="
+                + ROUND(
+                    FINAL_ALIGN_PRECOMMIT_RECOVERY_AERO_UNLOAD_PREDICTED_STOP_TIME,3)
             + ",finalAlignPrecommitReachabilityEntry="
                 + FINAL_ALIGN_PRECOMMIT_REACHABILITY_ENTRY
             + ",finalAlignPrecommitExtremeLowWindow="
@@ -4484,10 +5064,28 @@ UNTIL HOOK_CAPTURED() {
                 + ROUND(FINAL_ALIGN_PRECOMMIT_STOPPING_DISTANCE,3)
             + ",finalAlignPrecommitStoppingSurface="
                 + ROUND(FINAL_ALIGN_PRECOMMIT_STOPPING_SURFACE,3)
+            + ",finalAlignPrecommitReachabilityDecel="
+                + ROUND(
+                    FINAL_ALIGN_PRECOMMIT_ACTIVE_REACHABILITY_DECEL,3)
+            + ",finalAlignPrecommitReachabilityRealizedDecel="
+                + ROUND(FINAL_ALIGN_PRECOMMIT_REALIZED_DECEL,3)
+            + ",finalAlignPrecommitReachabilityDecelScale="
+                + ROUND(FINAL_ALIGN_PRECOMMIT_DECEL_SCALE,3)
             + ",finalAlignPrecommitActiveMaxAccel="
                 + ROUND(FINAL_ALIGN_PRECOMMIT_ACTIVE_MAX_ACCEL,3)
             + ",finalAlignPrecommitActiveTargetSpeed="
                 + ROUND(FINAL_ALIGN_PRECOMMIT_ACTIVE_TARGET_SPEED,3)
+            + ",finalAlignPrecommitSpatialDerivativeActive="
+                + FINAL_ALIGN_PRECOMMIT_SPATIAL_DERIVATIVE_ACTIVE
+            + ",finalAlignPrecommitEnvelopeDesiredDecel="
+                + ROUND(
+                    FINAL_ALIGN_PRECOMMIT_ENVELOPE_DESIRED_DECEL,3)
+            + ",finalAlignPrecommitEffectiveRealizedDecel="
+                + ROUND(
+                    FINAL_ALIGN_PRECOMMIT_EFFECTIVE_REALIZED_DECEL,3)
+            + ",finalAlignPrecommitActuatorDeficitCompensation="
+                + ROUND(
+                    FINAL_ALIGN_PRECOMMIT_ACTUATOR_DEFICIT_COMPENSATION,3)
             + ",finalAlignPrecommitActiveVelocityGain="
                 + ROUND(FINAL_ALIGN_PRECOMMIT_ACTIVE_VELOCITY_GAIN,3)
             + ",finalAlignPrecommitActiveAeroBrakeTailCeiling="
@@ -4509,6 +5107,21 @@ UNTIL HOOK_CAPTURED() {
                 + FINAL_CAPTURE_NEAR_NET_DAMPING_LATCHED
             + ",finalCaptureActiveVelocityGain="
                 + ROUND(FINAL_CAPTURE_ACTIVE_VELOCITY_GAIN,3)
+            + ",velocityAxisSeparation="
+                + ROUND(FINAL_CAPTURE_VELOCITY_AXIS_SEPARATION,3)
+            + ",velocityAxisSpeedLimit="
+                + ROUND(FINAL_CAPTURE_VELOCITY_AXIS_SPEED_LIMIT,3)
+            + ",velocityAxisPredictedSpeed="
+                + ROUND(FINAL_CAPTURE_VELOCITY_AXIS_PREDICTED_SPEED,3)
+            + ",velocityAxisRawSpeedGrowth="
+                + ROUND(FINAL_CAPTURE_VELOCITY_AXIS_RAW_SPEED_GROWTH,3)
+            + ",velocityAxisFilteredSpeedGrowth="
+                + ROUND(
+                    FINAL_CAPTURE_VELOCITY_AXIS_FILTERED_SPEED_GROWTH,3)
+            + ",velocityAxisBarrier="
+                + FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_ACTIVE
+            + ",velocityAxisBarrierAccel="
+                + ROUND(FINAL_CAPTURE_VELOCITY_AXIS_BARRIER_ACCEL,3)
             + ",engineMaxAccel="
                 + ROUND(RETURN_ENGINE_CURRENT_MAX_ACCEL,2)
             + ",alongVel=" + ROUND(DIAG_ALONG_VEL,2)
@@ -4540,6 +5153,42 @@ UNTIL HOOK_CAPTURED() {
                 + ROUND(MAIN_ALONG_AERO_BRAKE_REALIZED,2)
             + ",alongAeroBrakeError="
                 + ROUND(MAIN_ALONG_AERO_BRAKE_ERROR,2)
+            + ",alongAeroBrakeNominalError="
+                + ROUND(MAIN_ALONG_AERO_BRAKE_NOMINAL_ERROR,2)
+            + ",formalPlaneGovernor="
+                + MAIN_FORMAL_PLANE_GOVERNOR_ACTIVE
+            + ",formalPlaneGovernorTgo="
+                + ROUND(MAIN_FORMAL_PLANE_GOVERNOR_TGO,2)
+            + ",formalPlaneGovernorAlongPos="
+                + ROUND(MAIN_FORMAL_PLANE_GOVERNOR_ALONG_POS,2)
+            + ",formalPlaneGovernorReferenceSpeed="
+                + ROUND(
+                    MAIN_FORMAL_PLANE_GOVERNOR_REFERENCE_SPEED,2)
+            + ",formalPlaneGovernorPhaseError="
+                + ROUND(MAIN_FORMAL_PLANE_GOVERNOR_PHASE_ERROR,2)
+            + ",formalPlaneGovernorDecelScale="
+                + ROUND(MAIN_FORMAL_PLANE_GOVERNOR_DECEL_SCALE,3)
+            + ",formalPlaneGovernorSpeedRequired="
+                + ROUND(
+                    MAIN_FORMAL_PLANE_GOVERNOR_SPEED_REQUIRED,2)
+            + ",formalPlaneGovernorEffectiveRealized="
+                + ROUND(
+                    MAIN_FORMAL_PLANE_GOVERNOR_EFFECTIVE_REALIZED,2)
+            + ",formalPlaneGovernorPhaseControlError="
+                + ROUND(
+                    MAIN_FORMAL_PLANE_GOVERNOR_PHASE_CONTROL_ERROR,2)
+            + ",formalPlaneGovernorSpeedBarrierError="
+                + ROUND(
+                    MAIN_FORMAL_PLANE_GOVERNOR_SPEED_BARRIER_ERROR,2)
+            + ",formalPlaneGovernorEnvelopeDesiredDecel="
+                + ROUND(
+                    MAIN_FORMAL_PLANE_GOVERNOR_ENVELOPE_DESIRED_DECEL,2)
+            + ",formalPlaneGovernorBarrierBlend="
+                + ROUND(MAIN_FORMAL_PLANE_GOVERNOR_BARRIER_BLEND,3)
+            + ",formalPlaneGovernorReachabilityOverride="
+                + MAIN_FORMAL_PLANE_GOVERNOR_REACHABILITY_OVERRIDE
+            + ",formalPlaneGovernorError="
+                + ROUND(MAIN_FORMAL_PLANE_GOVERNOR_ERROR,2)
             + ",alongAeroBrakeAxis="
                 + ROUND(MAIN_ALONG_AERO_BRAKE_AXIS_DIAG,4)
             + ",alongBrake=" + ROUND(MAIN_ALONG_BRAKE_BLEND,3)
@@ -4654,6 +5303,9 @@ UNTIL HOOK_CAPTURED() {
             + ",attitudeRequestedTargetRate="
                 + ROUND(
                     FINAL_CAPTURE_ATTITUDE_REQUESTED_TARGET_RATE,3)
+            + ",attitudeLegalTargetRate="
+                + ROUND(
+                    FINAL_CAPTURE_ATTITUDE_LEGAL_TARGET_RATE,3)
             + ",attitudeGovernorTargetRate="
                 + ROUND(
                     FINAL_CAPTURE_ATTITUDE_GOVERNOR_TARGET_RATE,3)
@@ -4662,6 +5314,13 @@ UNTIL HOOK_CAPTURED() {
             + ",attitudeSafetyProjectionAngle="
                 + ROUND(
                     FINAL_CAPTURE_ATTITUDE_SAFETY_PROJECTION_ANGLE,3)
+            + ",attitudeConstraintAxisSeparation="
+                + ROUND(
+                    FINAL_CAPTURE_ATTITUDE_CONSTRAINT_AXIS_SEPARATION,3)
+            + ",attitudeConstraintMargin="
+                + ROUND(FINAL_CAPTURE_ATTITUDE_CONSTRAINT_MARGIN,3)
+            + ",attitudeSoftHardFeasible="
+                + FINAL_CAPTURE_ATTITUDE_SOFT_HARD_FEASIBLE
             + ",attitudeError="
                 + ROUND(FINAL_CAPTURE_ATTITUDE_ERROR,3)
             + ",attitudeRawTransverseRate="
